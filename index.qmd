@@ -1,0 +1,1503 @@
+---
+title: "Federal FOIA Dashboard — prototype"
+format:
+  dashboard:
+    nav-buttons: []
+    css: styles.css
+    # a prototype: keep it out of search engines
+    include-in-header:
+      text: '<meta name="robots" content="noindex, nofollow">'
+resources:
+  - data/foia.json
+  - data/laws.json
+  - assets/muckrock-logo.svg
+---
+
+## {.sidebar}
+
+```{ojs}
+//| output: false
+// MuckRock's data-visualization palette: MuckRock blue (steel blue 600) for branding and
+// single-series charts; yellow, purple and green for categories. Steps chosen so every pair stays apart for the
+// three common kinds of colour blindness (OKLab ΔE ≥ 10): blue 600, purple 700, green 800, yellow 500, red 500, blue 950
+BRAND = "#4582cc"
+SERIES = ["#4582cc", "#8c3a91", "#0b5a36", "#d4a92c", "#cc5c52", "#21304a"]
+// steel blue 300–950, for ordered bands (light = fast)
+STEEL = ["#a4d0ec", "#78b7e2", "#589bd9", "#4582cc", "#355a98", "#21304a"]
+OTHER = "#b9b7ae"
+fmt = d3.format(",")
+pct = d3.format(".0%")
+// axis numbers: 1.7M rather than 1.7e+6; small numbers with commas
+axisNum = d => Math.abs(d) >= 1e4 ? d3.format(".3~s")(d).replace("G", "B") : d3.format(",")(d)
+// a hidden input still needs a value, or the cells that use it wait forever
+hidden = v => Object.assign(html`<div></div>`, {value: v})
+// inputs that are rebuilt (e.g. the component list when the years change) keep the last choice:
+// memo() records it, recall() gives it back if it is still a valid option
+memo = (name, el) => { el.addEventListener("input", () => { window.__memo = Object.assign(window.__memo || {}, {[name]: el.value}) }); return el }
+recall = (name, ok, fallback) => { const v = (window.__memo || {})[name]; return v !== undefined && ok(v) ? v : fallback }
+TOTAL = "All agencies (total)"
+ALL = "__all__"
+// labels that depend on the data (rebuilt monthly): the years covered and how many agencies report
+ALL_AG = `All reporting agencies (${d3.min(PER_YEAR.values())}–${d3.max(PER_YEAR.values())} a year)`
+COHORT = `Only the ${N_COHORT} agencies that reported all ${N_YEARS} years`
+// the order of the story (client, 11/3): requests, processing time, exemptions, appeals, backlogs, then staff and cost.
+// ids stay as they were; a "step" is the place in the story
+STORY = [1, 2, 4, 5, 6, 3]
+stepOf = id => STORY.indexOf(id) + 1
+QUESTIONS = [
+  {id: 1, short: "Requests", text: "How have requests received and processed changed over time, and how do agencies differ?"},
+  {id: 2, short: "Response time", text: "How long do responses take, and how do simple, complex and expedited requests compare?"},
+  {id: 3, short: "Staff & cost", text: "How have backlog, staff and cost changed, and how do they relate?"},
+  {id: 4, short: "Outcomes & exemptions", text: "What happens to requests, and which exemptions are used most?"},
+  {id: 5, short: "Appeals", text: "How are appeals decided, and how often is the first decision reversed?"},
+  {id: 6, short: "Backlog", text: "How large are agency FOIA backlogs, and are they growing or shrinking relative to annual intake?"},
+  {id: 7, short: "Explore all data", text: "Any measure in the annual reports, for any agency or component."},
+  {id: 8, short: "About the data", text: "What the numbers are, what the words mean, and what to keep in mind."}]
+// the report's tables in six plain topics instead of foia.gov's numbering (client, 11/3: the general format is better)
+TOPICS = [
+  ["Requests", [["01", "Requests received, processed, pending"], ["02", "How requests ended"], ["03", "Requests closed for \"other\" reasons"],
+                ["04", "Expedited processing decisions"], ["29", "Requests: this report vs last year's report"]]],
+  ["Processing time", [["14", "Days to respond, all processed requests"], ["15", "Days to respond, requests granted"], ["16", "Simple requests by days taken"],
+                       ["17", "Complex requests by days taken"], ["18", "Expedited requests by days taken"], ["19", "Requests still pending, by track"],
+                       ["20", "Ten oldest pending requests"]]],
+  ["Exemptions", [["05", "Exemptions used"], ["24", "Exclusions"]]],
+  ["Appeals", [["07", "Appeals received, processed, pending"], ["08", "How appeals ended"], ["09", "Exemptions used in appeal denials"],
+               ["10", "Other reasons for denial on appeal"], ["11", "Appeals closed for \"other\" reasons"], ["12", "Days to decide an appeal"],
+               ["13", "Ten oldest pending appeals"], ["31", "Appeals: this report vs last year's report"]]],
+  ["Backlog", [["26", "Backlogged requests and appeals"], ["30", "Request backlog: this report vs last year's report"],
+               ["32", "Appeal backlog: this report vs last year's report"], ["27", "Consultations from other agencies"], ["28", "Ten oldest consultations"]]],
+  ["Staff & costs", [["22", "FOIA staff"], ["23", "FOIA costs and fees"], ["21", "Fee waiver decisions"], ["25", "Proactive disclosures"]]]]
+PLAIN = new Map(TOPICS.flatMap(([, types]) => types))
+typeName = no => PLAIN.get(no) || no
+// what each exemption protects (5 U.S.C. 552(b)), for readers who do not know the numbers
+EX_NAME = Object({"Ex. 1": "National security", "Ex. 2": "Internal personnel rules", "Ex. 3": "Other statutes", "Ex. 4": "Business information",
+  "Ex. 5": "Internal deliberations", "Ex. 6": "Personal privacy", "Ex. 7(A)": "Open enforcement proceedings", "Ex. 7(B)": "Fair trial",
+  "Ex. 7(C)": "Privacy in law enforcement", "Ex. 7(D)": "Confidential sources", "Ex. 7(E)": "Law enforcement techniques",
+  "Ex. 7(F)": "Personal safety", "Ex. 8": "Financial institutions", "Ex. 9": "Geological data on wells"})
+exName = e => `${e} · ${EX_NAME[e] || ""}`
+// the view in the page address, so a view can be shared; read once when the page opens
+URLQ = new URLSearchParams(location.search)
+// a select with optional groups; reads and reports like Inputs.select
+fillSelect = (sel, groups, format) => {
+  const opt = o => Object.assign(document.createElement("option"), {value: o, textContent: format(o)})
+  sel.replaceChildren(...groups.flatMap(([name, opts]) => {
+    if (!opts.length) return []
+    if (!name) return opts.map(opt)
+    const g = document.createElement("optgroup")
+    g.label = name
+    g.append(...opts.map(opt))
+    return [g]
+  }))
+}
+function groupedSelect({label, groups, value, format = String, disabled = false}) {
+  const sel = Object.assign(document.createElement("select"), {className: "form-select form-select-sm", disabled})
+  fillSelect(sel, groups, format)
+  sel.value = value
+  const wrap = html`<form class="gsel"><label>${label}</label>${sel}</form>`
+  wrap.value = sel.value
+  wrap.addEventListener("submit", e => e.preventDefault())
+  sel.addEventListener("change", () => { wrap.value = sel.value; wrap.dispatchEvent(new Event("input", {bubbles: true})) })
+  return wrap
+}
+```
+
+```{ojs}
+//| output: false
+// ---------- data: one row per agency per year and per component per year (prep.py) ----------
+D = FileAttachment("data/foia.json").json()
+V = D.values
+COLS = D.columns
+COL = new Map(COLS.map(c => [c.key, c]))
+TYPES = d3.groups(COLS, c => c.no).map(([no, cs]) => Object({no, type: cs[0].type}))
+LT1 = Object.fromEntries(Object.entries(D.lt1).map(([k, idx]) => [k, new Set(idx)]))
+lt1 = (i, key) => LT1[key] ? LT1[key].has(i) : false
+// Component = the code shown; Key = what tells components apart (the code, or "code · name" where one agency
+// uses the same code for two components, e.g. USPS "PS")
+ROWS = D.ids.FY.map((FY, i) => Object({i, FY, Agency: D.ids.Agency[i], Component: D.ids.Component[i], Key: D.ids.Key[i],
+  Name: D.ids.Name[i], level: D.ids.level[i], cohort: D.ids.cohort[i]}))
+agencyNames = [...new Set(ROWS.filter(r => r.level === "agency").map(r => r.Agency))].sort()
+// the agency list starts with the 10 that received the most requests in the latest year (listed A-Z: a shorter list, not a ranking)
+LATEST = ROWS.filter(r => r.level === "agency" && r.FY === FY_LAST).map(r => Object({Agency: r.Agency, n: V[F.received][r.i] ?? 0})).sort((a, b) => b.n - a.n)
+TOP_AGENCIES = LATEST.slice(0, 10).map(d => d.Agency).sort()
+TOP_SHARE = d3.sum(LATEST.slice(0, 10), d => d.n) / d3.sum(LATEST, d => d.n)
+AGENCY_GROUPS = [[`Largest 10 (most requests in FY${FY_LAST})`, TOP_AGENCIES], ["All other agencies", agencyNames.filter(a => !TOP_AGENCIES.includes(a))]]
+// the years in the data and the agencies reporting, so no year or count is written into the page
+FY_FIRST = d3.min(ROWS, r => r.FY)
+FY_LAST = d3.max(ROWS, r => r.FY)
+N_YEARS = FY_LAST - FY_FIRST + 1
+SPAN = `FY${FY_FIRST}–FY${FY_LAST}`
+PER_YEAR = d3.rollup(ROWS.filter(r => r.level === "agency"), v => v.length, r => r.FY)
+N_COHORT = new Set(ROWS.filter(r => r.level === "agency" && r.cohort).map(r => r.Agency)).size
+// everything that can be added under "Compare with": every agency, and every component (latest name)
+ENTITIES = [...agencyNames.map(a => Object({key: `A|${a}`, label: a, short: a})),
+  ...d3.groups(ROWS.filter(r => r.level === "component"), r => `${r.Agency}|${r.Key}`).map(([k, rs]) => {
+    const last = d3.greatest(rs, r => r.FY)
+    return {key: `C|${k}`, label: `${last.Agency} › ${last.Name} (${last.Component})`, short: `${last.Name} (${last.Component})`}
+  }).sort((a, b) => d3.ascending(a.label, b.label))]
+ENT = new Map(ENTITIES.map(e => [e.key, e]))
+ENT_BY_LABEL = new Map(ENTITIES.map(e => [e.label, e]))
+withFields = spec => ROWS.map(r => Object.assign({}, r, Object.fromEntries(Object.entries(spec).map(([k, c]) => [k, V[c][r.i]]))))
+F = Object({
+  received: "01_Requests__ProcessingStatisticsReceivedQuantity",
+  processed: "01_Requests__ProcessingStatisticsProcessedQuantity",
+  pending_end: "01_Requests__ProcessingStatisticsPendingAtEndQuantity",
+  backlog: "26_Backlog__BackloggedRequestQuantity",
+  staff: "22_Personnel__TotalFullTimeStaffQuantity",
+  total_costs: "23_Costs__TotalCostAmount",
+  affirmed: "08_AppealsDisposition__AppealDispositionAffirmedQuantity",
+  partial: "08_AppealsDisposition__AppealDispositionPartialQuantity",
+  reversed: "08_AppealsDisposition__AppealDispositionReversedQuantity",
+  other: "08_AppealsDisposition__AppealDispositionOtherQuantity",
+  total: "08_AppealsDisposition__AppealDispositionTotalQuantity"})
+OUTCOME_COL = Object({
+  "Full grant": "02_Disposition__RequestDispositionFullGrantQuantity",
+  "Partial grant / partial denial": "02_Disposition__RequestDispositionPartialGrantQuantity",
+  "Full denial (exemptions)": "02_Disposition__RequestDispositionFullExemptionDenialQuantity",
+  "No records": "02_Disposition__NonExemptionDenialQuantity[NoRecords]",
+  "Withdrawn": "02_Disposition__NonExemptionDenialQuantity[Withdrawn]",
+  "Referred": "02_Disposition__NonExemptionDenialQuantity[Referred]",
+  "Fee-related": "02_Disposition__NonExemptionDenialQuantity[FeeRelated]",
+  "Not reasonably described": "02_Disposition__NonExemptionDenialQuantity[NotDescribed]",
+  "Improper request": "02_Disposition__NonExemptionDenialQuantity[ImproperRequest]",
+  "Not agency record": "02_Disposition__NonExemptionDenialQuantity[NotAgency]",
+  "Duplicate": "02_Disposition__NonExemptionDenialQuantity[Duplicate]",
+  "Other": "02_Disposition__NonExemptionDenialQuantity[Other]"})
+OUTCOMES = Object.keys(OUTCOME_COL)
+MAIN_OUTCOMES = ["Full grant", "Partial grant / partial denial", "Full denial (exemptions)", "No records", "Withdrawn"]
+EXEMPTIONS = COLS.filter(c => c.key.startsWith("05_Exemptions__AppliedExemptionQuantity[")).map(c => c.key.match(/\[(.*)\]/)[1])
+APPEALS = [["Affirmed", "affirmed"], ["Partly reversed", "partial"], ["Fully reversed", "reversed"], ["Closed for other reasons", "other"]]
+Q1 = withFields({received: F.received, processed: F.processed, pending_end: F.pending_end})
+Q3 = withFields({backlog: F.backlog, received: F.received, processed: F.processed, staff: F.staff, total_costs: F.total_costs})
+  .map(d => Object.assign(d, {backlog_restated: D.backlog_restated[d.i]}, {restated: D.backlog_restated[d.i] != null && d.backlog != null && D.backlog_restated[d.i] !== d.backlog}))
+Q4D = withFields(OUTCOME_COL)
+Q4E = withFields(Object.fromEntries(EXEMPTIONS.map(e => [e, `05_Exemptions__AppliedExemptionQuantity[${e}]`])))
+Q5 = withFields({affirmed: F.affirmed, partial: F.partial, reversed: F.reversed, other: F.other, total: F.total})
+BUCKETS = ["1-20", "21-40", "41-60", "61-80", "81-100", "101-120", "121-140", "141-160", "161-180", "181-200", "201-300", "301-400", "401+"]
+B = BUCKETS.map((k, j) => Object({col: "b" + j, label: k === "1-20" ? "≤20 days" : k.replace("-", "–") + " days"}))
+TRACKS = [["Simple", "16_SimpleRequests", "SimpleResponseTime"], ["Complex", "17_ComplexRequests", "ComplexResponseTime"],
+          ["Expedited", "18_ExpeditedRequests", "ExpeditedResponseTime"]]
+Q2 = TRACKS.flatMap(([track, inc, rt]) => {
+  const med = `14_ProcessingTime__${rt}.ResponseTimeMedianDaysValue`
+  return ROWS.map(r => Object.assign({}, r, {track, median: V[med][r.i], medianLt1: lt1(r.i, med)},
+    Object.fromEntries(BUCKETS.map((k, j) => ["b" + j, V[`${inc}__TimeIncrementProcessedQuantity[${k}]`][r.i]]))))
+})
+```
+
+```{ojs}
+//| output: false
+// ---------- shared helpers ----------
+// max-width keeps two charts side by side even when a legend is wide (the legend wraps instead)
+figure = (title, chart) => html`<figure style="max-width:${Math.max(PAIR, 360)}px"><h6>${title}</h6>${chart}</figure>`
+pair = (a, b) => html`<div class="pair">${a}${b}</div>`
+note = text => html`<div class="chart-note">${text}</div>`
+// a table's rows as a CSV file: raw numbers, blank for missing, "<1" where the report says less than a day
+function csvLink(title, el) {
+  const form = el.matches?.("form") ? el : el.querySelector?.("form")
+  if (!form) return ""
+  const a = html`<a class="csv" href="#">Download CSV</a>`
+  a.onclick = e => {
+    e.preventDefault()
+    const rows = (form.value || []).map(r => Object.fromEntries(Object.keys(r).filter(k => k !== "lt1").map(k => [k, r.lt1 && r.lt1[k] ? "<1" : r[k] ?? ""])))
+    const url = URL.createObjectURL(new Blob([d3.csvFormat(rows)], {type: "text/csv"}))
+    const link = Object.assign(document.createElement("a"), {href: url, download: `foia_${title.replace(/[^A-Za-z0-9]+/g, "_").slice(0, 60)}.csv`})
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+  return a
+}
+caption = (title, el) => html`<div class="tcap"><h6>${title} ${csvLink(title, el)}</h6>${el}</div>`
+shortName = s => s.length > 36 ? s.slice(0, 35) + "…" : s
+// sum that stays missing (null) when every value is missing, instead of becoming 0
+total = (v, f) => { const xs = v.map(f).filter(x => x != null); return xs.length ? d3.sum(xs) : null }
+nameCell = d => d.length > 45 ? html`<span title="${d}">${d.slice(0, 44)}…</span>` : d
+num = d => d == null ? "" : fmt(Math.round(d * 100) / 100)
+pctCell = d => d == null ? "" : pct(d)
+// "<1" is stored as 0.5; the table shows it as "<1" (the row carries the flags in lt1)
+daysCell = key => (v, i, data) => v == null ? "" : data[i].lt1 && data[i].lt1[key] ? "<1" : num(v)
+table = (rows, opts) => Inputs.table(rows, Object.assign({sort: NAME_COL, layout: "auto", height: TH - 60,
+  columns: Object.keys(rows[0] || {}).filter(k => k !== "lt1")}, opts, {format: Object.assign({[NAME_COL]: nameCell}, opts.format)}))
+// tables with one row per fiscal year (or per category), in chart order
+// missing years as explicit gaps (y = NaN; Plot would draw null as 0), so lines break instead of bridging years with no report
+withGaps = (data, y, z) => {
+  const groups = z ? d3.groups(data, d => d[z]) : [[null, data]]
+  return groups.flatMap(([k, v]) => {
+    const have = new Map(v.filter(d => d[y] != null).map(d => [d.FY, d]))
+    return d3.range(lo, hi + 1).map(FY => have.get(FY) || Object.assign({FY, [y]: NaN}, z ? {[z]: k} : {}))
+  })
+}
+// a measure over the years: lines and dots; with a single year, horizontal bars from zero
+// (one dot on a zoomed-in axis would exaggerate tiny differences)
+function trend({data, y, z = null, names = null, colors = [BRAND], yopt = {}, title, dashed = null, rules = [], clip = false, height = CH}) {
+  const color = names ? {domain: names, range: colors, legend: true} : undefined
+  if (lo === hi) {
+    const nm = names || [yopt.label || "Value"]
+    const rows = data.filter(d => d.FY === hi && d[y] != null)
+    if (!rows.length) return note(`Nothing reported for FY${hi}.`)
+    return Plot.plot({height: Math.max(120, 60 + 38 * nm.length), width: PAIR, marginLeft: Math.min(220, 16 + 6.5 * d3.max(nm, n => n.length)),
+      x: {grid: true, label: `FY${hi}${yopt.label ? ": " + yopt.label : ""}`, percent: !!yopt.percent, tickFormat: yopt.tickFormat},
+      y: {domain: nm, label: null}, color,
+      marks: [Plot.barX(rows, {x: y, y: z || (() => nm[0]), fill: z || colors[0], tip: true, title}), Plot.ruleX([0])]})
+  }
+  // two years: a line would be one straight segment, so bars side by side (the axis starts at zero, like every bar chart here)
+  if (hi - lo === 1) {
+    const nm = names || [yopt.label || "Value"]
+    const rows = data.filter(d => d[y] != null && !Number.isNaN(d[y]))
+    if (!rows.length) return note(`Nothing reported for FY${lo}–FY${hi}.`)
+    return Plot.plot({height, width: PAIR, marginLeft: 60, fx: TWO_YEARS, x: {axis: null, domain: nm}, y: Object.assign({grid: true, nice: true}, yopt), color,
+      marks: [...rules, Plot.barY(rows, {fx: "FY", x: z || (() => nm[0]), y, fill: z || colors[0], tip: true, title, clip}), Plot.ruleY([0])]})
+  }
+  const known = data.filter(d => d[y] != null && !Number.isNaN(d[y]))
+  if (!known.length) return note(`Nothing reported for FY${lo}–FY${hi}.`)
+  const solid = withGaps(dashed ? data.filter(d => !dashed(d)) : data, y, z)
+  return Plot.plot({height, width: PAIR, marginLeft: 60, x: yearX, y: Object.assign({grid: true}, yopt), color,
+    marks: [...rules,
+            Plot.lineY(solid, {x: "FY", y, stroke: z || colors[0], strokeWidth: 2, clip}),
+            ...(dashed ? [Plot.lineY(withGaps(data.filter(dashed), y, z), {x: "FY", y, stroke: z || colors[0], strokeWidth: 2, strokeDasharray: "5,3", clip})] : []),
+            Plot.dot(known, {x: "FY", y, fill: z || colors[0], r: 3, tip: true, title, clip})]})
+}
+// the year axis of a two-year chart: both years stay on it even if one has no report
+TWO_YEARS = Object({domain: [lo, hi], axis: "bottom", label: null, tickFormat: d => `FY${d}`})
+plainTable = (rows, format = {}, first = "FY") => Inputs.table(rows, {layout: "auto", maxHeight: TH - 60, sort: first,
+  columns: Object.keys(rows[0] || {}).filter(k => k !== "lt1"), format: Object.assign({FY: String}, format)})
+```
+
+```{ojs}
+//| output: false
+// ---------- Q1 requests received and processed ----------
+function q1data() {
+  const sums = byYear(d3.rollups(pick(Q1), v => Object({FY: v[0].FY, Received: total(v, d => d.received), Processed: total(v, d => d.processed)}), d => d.FY).map(d => d[1]))
+  if (agency === TOTAL) {
+    const right = byYear(d3.rollups(Q1.filter(d => d.level === "agency" && d.FY >= lo && d.FY <= hi && d.received != null && (!cohortOnly || d.cohort)), v => v.length, d => d.FY).map(([FY, n]) => Object({FY, n})))
+    return {sums, right, rightName: "Agencies reporting"}
+  }
+  // agency: share of all federal requests; component: share of its agency's requests
+  const base = comp === ALL
+    ? d3.rollup(Q1.filter(d => d.level === "agency" && d.FY >= lo && d.FY <= hi), v => d3.sum(v, d => d.received), d => d.FY)
+    : new Map(Q1.filter(d => d.level === "agency" && d.Agency === agency).map(d => [d.FY, d.received]))
+  const right = byYear(pick(Q1).filter(d => d.received != null && base.get(d.FY)).map(d => Object({FY: d.FY, share: d.received / base.get(d.FY), n: d.received})))
+  return {sums, right, rightName: comp === ALL ? "Share of all federal requests" : `Share of ${agency}'s requests`}
+}
+function chart1() {
+  const {sums, right, rightName} = q1data()
+  const long = sums.flatMap(s => ["Received", "Processed"].map(kind => Object({FY: s.FY, kind, value: s[kind]}))).filter(d => d.value != null)
+  const left = trend({data: long, y: "value", z: "kind", names: ["Received", "Processed"], colors: SERIES.slice(0, 2),
+    yopt: {label: "Requests", tickFormat: axisNum}, title: d => `${d.kind}, FY${d.FY}: ${fmt(d.value)}`})
+  const r = agency === TOTAL
+    ? (lo === hi ? note(`${right[0] ? right[0].n : 0} agencies reported for FY${hi}.`)
+      : Plot.plot({height: CH, width: PAIR, marginLeft: 50, x: yearBand, y: {grid: true, label: "Agencies"},
+          marks: [Plot.barY(right, {x: "FY", y: "n", fill: BRAND, tip: true, title: d => `FY${d.FY}: ${d.n} agencies`})]}))
+    : trend({data: right, y: "share", yopt: {label: "Share (%)", percent: true}, title: d => `FY${d.FY}: ${d3.format(".1%")(d.share)} (${fmt(d.n)} requests)`})
+  return pair(figure("Requests received and processed", left), figure(rightName, r))
+}
+function data1() {
+  const {sums, right, rightName} = q1data()
+  const r = new Map(right.map(d => [d.FY, agency === TOTAL ? d.n : d.share]))
+  const rows = sums.map(s => Object({FY: s.FY, Received: s.Received, Processed: s.Processed,
+    "Processed ÷ received": s.Received ? s.Processed / s.Received : null, [rightName]: r.get(s.FY) ?? null}))
+  return [caption(`${who}, FY${lo}–FY${hi}`, plainTable(rows, {Received: num, Processed: num, "Processed ÷ received": pctCell,
+    [rightName]: agency === TOTAL ? num : d => d == null ? "" : d3.format(".1%")(d)}))]
+}
+function table1() {
+  const rows = yearRows(Q1).filter(d => d.received != null).map(d => Object({[NAME_COL]: rowName(d), Received: d.received, Processed: d.processed,
+    "Processed ÷ received": d.received ? d.processed / d.received : null, "Pending at end of year": d.pending_end}))
+  return table(rows, {format: {Received: num, Processed: num, "Processed ÷ received": pctCell, "Pending at end of year": num}})
+}
+```
+
+```{ojs}
+//| output: false
+// ---------- Q2 response time ----------
+function q2data() {
+  const rows = pick(Q2).filter(d => d.FY === hi)
+  const dist = ["Simple", "Complex", "Expedited"].flatMap(track => {
+    const r = rows.filter(d => d.track === track)
+    const counts = B.map(b => Object({track, range: b.label, n: total(r, d => d[b.col])}))  // total(): blank stays blank, not 0
+    const tot = d3.sum(counts, d => d.n)
+    return counts.map(c => Object.assign(c, {share: tot && c.n != null ? c.n / tot : null}))
+  })
+  if (agency === TOTAL) {
+    // medians cannot be added: the 15 agencies that processed the most requests, side by side (alphabetical)
+    const top = Q1.filter(d => d.level === "agency" && d.FY === hi && d.processed != null && (!cohortOnly || d.cohort)).sort((a, b) => b.processed - a.processed).slice(0, 15).map(d => d.Agency).sort()
+    const med = Q2.filter(d => d.level === "agency" && d.FY === hi && top.includes(d.Agency) && d.track !== "Expedited" && d.median !== null)
+    return {dist, med, top}
+  }
+  return {dist, med: byYear(pick(Q2).filter(d => d.median !== null)), top: null}
+}
+medText = d => `${d.medianLt1 ? "<1" : d.median} days`
+// day ranges grouped into six bands for the chart
+BANDS = [["≤20 days", ["≤20 days"]], ["21–60", ["21–40 days", "41–60 days"]], ["61–100", ["61–80 days", "81–100 days"]],
+         ["101–200", ["101–120 days", "121–140 days", "141–160 days", "161–180 days", "181–200 days"]],
+         ["201–400", ["201–300 days", "301–400 days"]], ["401+ days", ["401+ days"]]]
+BAND_OF = new Map(BANDS.flatMap(([band, ranges]) => ranges.map(r => [r, band])))
+function chart2() {
+  const {dist, med, top} = q2data()
+  // six bands for the chart (the table keeps all 13 day ranges)
+  const banded = d3.rollups(dist, v => Object({track: v[0].track, band: BAND_OF.get(v[0].range), n: d3.sum(v, d => d.n), share: d3.sum(v, d => d.share ?? 0)}),
+    d => d.track, d => BAND_OF.get(d.range)).flatMap(([, bs]) => bs.map(([, o]) => o))
+  const left = Plot.plot({
+    height: CH, width: PAIR, marginLeft: 80, x: {label: "Share of processed requests", tickFormat: pct, grid: true},
+    y: {domain: ["Simple", "Complex", "Expedited"], label: null},
+    color: {domain: BANDS.map(b => b[0]), range: STEEL, legend: true},
+    marks: [Plot.barX(banded, Plot.stackX({x: "share", y: "track", fill: "band", order: BANDS.map(b => b[0]), tip: true,
+              title: d => `${d.track}, ${d.band}: ${fmt(d.n)} (${pct(d.share)})`}))]})
+  const right = top
+    ? figure(`Median working days, FY${hi}: the 15 agencies that processed the most requests`, Plot.plot({
+        height: CH, width: PAIR, marginLeft: 230,
+        x: {type: "symlog", grid: true, ticks: PAIR < 480 ? [0, 1, 5, 20, 100, 1000] : [0, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000], tickFormat: String, label: "Median days (log-like scale; line = 20 days)"},
+        y: {domain: top, label: null, tickFormat: shortName},
+        color: {domain: ["Simple", "Complex"], range: SERIES.slice(0, 2), legend: true},
+        marks: [Plot.ruleX([20], {stroke: "#888", strokeDasharray: "4,3"}),
+                Plot.dot(med, {x: "median", y: "Agency", fill: "track", r: 4, tip: true, title: d => `${d.Agency}, ${d.track}: ${medText(d)}`})]}))
+    : figure("Median working days to respond, as reported", med.length ? trend({data: med, y: "median", z: "track", names: ["Simple", "Complex", "Expedited"],
+        colors: SERIES.slice(0, 3), yopt: {label: "Median days"}, rules: [Plot.ruleY([20], {stroke: "#888", strokeDasharray: "4,3"})],
+        title: d => `${d.track}, FY${d.FY}: ${medText(d)}`})
+        : note("No medians reported for this selection. Agencies with several components often report medians per component only: pick a component."))
+  return pair(figure(`Requests processed by working days taken, FY${hi}`, left), right)
+}
+function data2() {
+  const {dist, med, top} = q2data()
+  const byRange = B.map(b => {
+    const r = {"Days taken": b.label}
+    for (const t of ["Simple", "Complex", "Expedited"]) {
+      const x = dist.find(d => d.track === t && d.range === b.label)
+      r[t] = x.n; r[`${t} %`] = x.share
+    }
+    return r
+  })
+  const p = {Simple: num, Complex: num, Expedited: num, "Simple %": pctCell, "Complex %": pctCell, "Expedited %": pctCell}
+  const a = caption(`Requests processed by days taken, FY${hi} (${who})`, Inputs.table(byRange, {layout: "auto", format: p}))
+  const key = top ? "Agency" : "FY"
+  const medRows = d3.groups(med, d => top ? d.Agency : d.FY).map(([k, v]) => {
+    const r = {[key]: k, lt1: {}}
+    for (const d of v) { r[`${d.track} median`] = d.median; if (d.medianLt1) r.lt1[`${d.track} median`] = true }
+    return r
+  })
+  const cols = top ? ["Simple median", "Complex median"] : ["Simple median", "Complex median", "Expedited median"]
+  for (const r of medRows) for (const c of cols) if (!(c in r)) r[c] = null
+  const b = caption(top ? `Median days, FY${hi}: the 15 agencies that processed the most requests` : `Median days to respond (${who})`,
+    medRows.length ? plainTable(medRows.map(r => Object.assign(Object.fromEntries([key, ...cols].map(c => [c, r[c]])), {lt1: r.lt1})),
+      Object.fromEntries(cols.map(c => [c, daysCell(c)])), key) : note("No medians reported for this selection."))
+  return [a, b]
+}
+function table2() {
+  const within20 = d => { const t = d3.sum(B, b => d[b.col]); return t ? d.b0 / t : null }
+  const out = d3.groups(yearRows(Q2), d => d.i).map(([i, v]) => {
+    const t = Object.fromEntries(v.map(d => [d.track, d]))
+    return {[NAME_COL]: rowName(v[0]), "Simple median": t.Simple.median, "Complex median": t.Complex.median, "Expedited median": t.Expedited.median,
+            "Simple ≤20 days": within20(t.Simple), "Complex ≤20 days": within20(t.Complex),
+            lt1: {"Simple median": t.Simple.medianLt1, "Complex median": t.Complex.medianLt1, "Expedited median": t.Expedited.medianLt1}}
+  })
+  return table(out, {format: {"Simple median": daysCell("Simple median"), "Complex median": daysCell("Complex median"),
+                              "Expedited median": daysCell("Expedited median"), "Simple ≤20 days": pctCell, "Complex ≤20 days": pctCell}})
+}
+```
+
+```{ojs}
+//| output: false
+// ---------- Q3 backlog, staff and cost ----------
+MEASURES3 = Object({Backlog: "backlog", "Requests received": "received", "FOIA staff": "staff", "Total cost": "total_costs"})
+function q3data() {
+  const rows = pick(Q3)
+  const sums = byYear(d3.rollups(rows, v => Object.assign({FY: v[0].FY}, Object.fromEntries(Object.entries(MEASURES3).map(([k, c]) => [k, total(v, d => d[c])]))), d => d.FY).map(d => d[1]))
+  // index base: the first year in the range with a value
+  const idx = Object.keys(MEASURES3).flatMap(k => {
+    const base = sums.find(s => s[k] > 0)
+    return base ? sums.filter(s => s[k] != null).map(s => Object({FY: s.FY, measure: k, value: s[k], index: 100 * s[k] / base[k], base: base.FY})) : []
+  })
+  // backlog as first reported vs as revised in the next year's report (no revision yet for the last year)
+  const rev = byYear(d3.rollups(rows.filter(d => d.backlog != null), v => Object({FY: v[0].FY, first: d3.sum(v, d => d.backlog),
+    revised: v.some(d => d.backlog_restated != null) ? d3.sum(v, d => d.backlog_restated ?? d.backlog) : null}), d => d.FY).map(d => d[1]))
+  return {sums, idx, rev}
+}
+function chart3() {
+  const {idx, rev} = q3data()
+  const left = lo === hi ? note("The index compares each year with the first year: pick at least two years.")
+    : hi - lo === 1 ? trend({data: idx, y: "index", z: "measure", names: Object.keys(MEASURES3), colors: SERIES.slice(0, 4), yopt: {label: `Index (FY${lo} = 100)`},
+        title: d => `${d.measure}, FY${d.FY}: ${d.measure === "Total cost" ? "$" : ""}${fmt(Math.round(d.value))} (index ${Math.round(d.index)}, FY${d.base} = 100)`})
+    : Plot.plot({
+    height: CH, width: PAIR, marginLeft: 50, x: yearX, y: {grid: true, label: `Index (FY${lo} = 100)`},
+    color: {domain: Object.keys(MEASURES3), range: SERIES.slice(0, 4), legend: true},
+    marks: [Plot.ruleY([100], {stroke: "#c3c2b7"}),
+            Plot.lineY(idx, {x: "FY", y: "index", stroke: "measure", strokeWidth: 2}),
+            Plot.dot(idx, {x: "FY", y: "index", fill: "measure", r: 3, tip: true,
+              title: d => `${d.measure}, FY${d.FY}: ${d.measure === "Total cost" ? "$" : ""}${fmt(Math.round(d.value))} (index ${Math.round(d.index)}, FY${d.base} = 100)`})]})
+  const revLong = rev.flatMap(r => [Object({FY: r.FY, kind: "As first reported", value: r.first}), Object({FY: r.FY, kind: "As revised in the next report", value: r.revised})]).filter(d => d.value != null)
+  const right = trend({data: revLong, y: "value", z: "kind", names: ["As first reported", "As revised in the next report"], colors: [SERIES[0], SERIES[1]],
+    yopt: {label: "Backlogged requests", tickFormat: axisNum}, dashed: d => d.kind !== "As first reported", title: d => `${d.kind}, FY${d.FY}: ${fmt(d.value)}`})
+  return pair(figure("Backlog, requests, staff and cost on one scale", left), figure("Backlog: first reported vs revised", right))
+}
+function data3() {
+  const {sums, idx, rev} = q3data()
+  const r = new Map(rev.map(d => [d.FY, d.revised]))
+  const ix = d3.rollup(idx, v => v[0].index, d => d.FY, d => d.measure)
+  const rows = sums.map(s => Object({FY: s.FY, Backlog: s.Backlog, "Backlog as revised next year": r.get(s.FY) ?? null,
+    "Requests received": s["Requests received"], "FOIA staff": s["FOIA staff"], "Total cost ($)": s["Total cost"],
+    "Backlog index": ix.get(s.FY)?.get("Backlog"), "Received index": ix.get(s.FY)?.get("Requests received"),
+    "Staff index": ix.get(s.FY)?.get("FOIA staff"), "Cost index": ix.get(s.FY)?.get("Total cost")}))
+  const i0 = d => d == null ? "" : Math.round(d)
+  return [caption(`${who}, FY${lo}–FY${hi} (index: first year with a value = 100)`, plainTable(rows, {Backlog: num, "Backlog as revised next year": num,
+    "Requests received": num, "FOIA staff": num, "Total cost ($)": d => d == null ? "" : fmt(Math.round(d)),
+    "Backlog index": i0, "Received index": i0, "Staff index": i0, "Cost index": i0}))]
+}
+function table3() {
+  const rows = yearRows(Q3).filter(d => d.received != null || d.backlog != null).map(d => Object({[NAME_COL]: rowName(d), Backlog: d.backlog,
+    "Backlog ÷ received": d.received ? d.backlog / d.received : null, "Processed per staff": d.staff ? d.processed / d.staff : null,
+    "Cost per processed ($)": d.processed ? d.total_costs / d.processed : null,
+    "Backlog revised next year": d.restated ? `${fmt(d.backlog)} → ${fmt(d.backlog_restated)}` : ""}))
+  const r = d => d == null ? "" : fmt(Math.round(d))
+  return table(rows, {format: {Backlog: r, "Backlog ÷ received": d => d == null ? "" : d.toFixed(2), "Processed per staff": r, "Cost per processed ($)": r}})
+}
+```
+
+```{ojs}
+//| output: false
+// ---------- Q4 outcomes and exemptions ----------
+function q4data() {
+  // base = the outcome categories added up, not the reported "Total" (wrong for 4 agencies in FY2025)
+  const share = d3.rollups(pick(Q4D), v => {
+    const tot = total(v, d => OUTCOMES.some(c => d[c] != null) ? d3.sum(OUTCOMES, c => d[c]) : null)  // blank stays blank, not 0
+    const groups = d3.rollup(OUTCOMES, cs => d3.sum(cs, c => d3.sum(v, d => d[c])), c => MAIN_OUTCOMES.includes(c) ? c : "All other")
+    return [...groups].map(([cat, n]) => Object({cat, n, tot, share: tot ? n / tot : null}))
+  }, d => d.FY).flatMap(([FY, arr]) => arr.map(o => Object.assign({FY}, o)))
+  const exRows = pick(Q4E).filter(d => d.FY === hi)
+  const ex = EXEMPTIONS.map(e => Object({ex: e, n: d3.sum(exRows, d => d[e])})).filter(d => d.n > 0)
+  return {share, ex}
+}
+function chart4() {
+  const {share, ex} = q4data()
+  const left = Plot.plot({
+    height: CH - 36, width: PAIR, marginLeft: 50, x: yearBand, y: {label: "Share of processed requests", tickFormat: pct, grid: true},
+    color: {domain: [...MAIN_OUTCOMES, "All other"], range: [...SERIES.slice(0, 5), OTHER], legend: true},
+    marks: [Plot.barY(share, Plot.stackY({x: "FY", y: "share", fill: "cat", order: [...MAIN_OUTCOMES, "All other"], tip: true,
+              title: d => `${d.cat}, FY${d.FY}: ${fmt(d.n)} (${pct(d.share)})`}))]})
+  const right = ex.length ? Plot.plot({
+    height: CH - 36, width: PAIR, marginLeft: 225, x: {label: "Times applied", tickFormat: axisNum, grid: true}, y: {label: null},
+    marks: [Plot.barX(ex, {x: "n", y: d => exName(d.ex), fill: BRAND, sort: {y: "x", reverse: true}, tip: true, title: d => `${exName(d.ex)}: ${fmt(d.n)}`})]})
+    : note(`No exemptions reported for this selection in FY${hi}.`)
+  return pair(figure("What happened to processed requests", left), figure(`Exemptions used, FY${hi} (times applied)`, right))
+}
+function data4() {
+  const {share, ex} = q4data()
+  const cats = [...MAIN_OUTCOMES, "All other"]
+  const rows = d3.groups(share, d => d.FY).sort((a, b) => a[0] - b[0]).map(([FY, v]) =>
+    Object.assign({FY, "Processed (categories added)": v[0].tot}, Object.fromEntries(cats.map(c => [c, (v.find(d => d.cat === c) || {}).share ?? null]))))
+  const a = caption(`Share of processed requests, ${who}, FY${lo}–FY${hi}`,
+    plainTable(rows, Object.assign({"Processed (categories added)": num}, Object.fromEntries(cats.map(c => [c, pctCell])))))
+  const b = caption(`Exemptions used, FY${hi} (times applied)`, ex.length
+    ? Inputs.table(ex.map(d => Object({Exemption: d.ex, "Times applied": d.n, Protects: EX_NAME[d.ex]})), {layout: "auto", format: {"Times applied": num}})
+    : note(`No exemptions reported for this selection in FY${hi}.`))
+  return [a, b]
+}
+function table4() {
+  const rows = yearRows(Q4D).map(d => {
+    const tot = d3.sum(OUTCOMES, c => d[c])
+    const s = c => tot ? (d[c] ?? 0) / tot : null
+    return {[NAME_COL]: rowName(d), Processed: tot, "Full grant": s("Full grant"), "Partial grant": s("Partial grant / partial denial"),
+            "Full denial (exemptions)": s("Full denial (exemptions)"), "No records": s("No records"),
+            "Other outcomes": tot ? 1 - d3.sum(["Full grant", "Partial grant / partial denial", "Full denial (exemptions)", "No records"], c => d[c]) / tot : null}
+  }).filter(d => d.Processed > 0)
+  return table(rows, {format: {Processed: num, "Full grant": pctCell, "Partial grant": pctCell, "Full denial (exemptions)": pctCell, "No records": pctCell, "Other outcomes": pctCell}})
+}
+```
+
+```{ojs}
+//| output: false
+// ---------- Step 3, second view: the laws behind Exemption 3 (report table 06; data/laws.json comes from prep_laws.py) ----------
+LD = FileAttachment("data/laws.json").json()
+LROWS = LD.rows.FY.map((FY, i) => Object({FY, Agency: LD.agencies[LD.rows.a[i]], Key: LD.rows.k[i] < 0 ? "" : LD.keys[LD.rows.k[i]], law: LD.rows.law[i], n: LD.rows.n[i]}))
+COHORT_SET = new Set(ROWS.filter(r => r.level === "agency" && r.cohort).map(r => r.Agency))
+EX3 = "05_Exemptions__AppliedExemptionQuantity[Ex. 3]"
+// comparing agencies uses the two usual charts: this view is about one selection
+lawsOn = qi === 4 && sub4 === "laws" && compareWith.length === 0
+// Key "" = an agency's own row; a component's row carries its Key
+lawSel = d => agency === TOTAL ? d.Key === "" && (!cohortOnly || COHORT_SET.has(d.Agency)) : d.Agency === agency && d.Key === (comp === ALL ? "" : comp)
+clip = (s, n) => s.length > n ? s.slice(0, n - 1).trimEnd() + "…" : s
+lawCite = id => clip(LD.laws[id].cite, 34)
+// the section's own title; a repealed or moved section says so in a few words
+lawTitle = id => { const t = LD.laws[id].title, m = t.match(/^(Repealed|Transferred|Omitted|Renumbered|Reserved)/); return m ? m[1] : t }
+// who relied on a law in the last year chosen, A-Z (this is a list, not a ranking): agencies for the total, components for an agency
+lawUsers = id => {
+  if (agency !== TOTAL && comp !== ALL) return []
+  const rows = LROWS.filter(d => d.FY === hi && d.law === id && (agency === TOTAL ? d.Key === "" && (!cohortOnly || COHORT_SET.has(d.Agency)) : d.Agency === agency && d.Key !== ""))
+  return rows.map(d => [agency === TOTAL ? LD.abbr[d.Agency] || d.Agency : d.Key, d.n]).sort((a, b) => d3.ascending(a[0], b[0])).map(([who, n]) => `${who} ${fmt(n)}`)
+}
+function lawData() {
+  const rows = LROWS.filter(d => d.FY >= lo && d.FY <= hi && lawSel(d))
+  const sums = d3.rollups(rows.filter(d => d.FY === hi), v => d3.sum(v, d => d.n), d => d.law).map(([law, n]) => Object({law, n}))
+    .sort((a, b) => d3.descending(a.n, b.n) || d3.ascending(LD.laws[a.law].cite, LD.laws[b.law].cite))
+  const five = sums.slice(0, 5).map(d => d.law)
+  const long = d3.rollups(rows.filter(d => five.includes(d.law)), v => d3.sum(v, d => d.n), d => d.law, d => d.FY)
+    .flatMap(([law, ys]) => ys.map(([FY, n]) => Object({FY, law: lawCite(law), n})))
+  return {sums, total: d3.sum(sums, d => d.n), five, long}
+}
+// the first layer answers one question: which laws are used most, and what do they protect. Everything else is in the Tables tab.
+// One row: what the law covers (the agencies' words) on the left; the count, a bar and the citation (a link to its text) on the right.
+// Text goes in as text, never as HTML
+function lawRow({cite, url, n, words, max, dot, hover}) {
+  const el = (tag, cls, text) => { const e = document.createElement(tag); e.className = cls; if (text != null) e.textContent = text; return e }
+  const row = el("div", "law"), d = el("span", "lawdot"), right = el("div", "lawright"), line = el("div", "lawline"), bar = el("div", "lawbar"), fill = el("i", "")
+  if (dot) d.style.background = dot
+  fill.style.width = `${100 * n / max}%`
+  bar.append(fill)
+  line.append(bar, el("span", "lawn", fmt(n)))
+  right.append(line)
+  if (cite) right.append(url ? Object.assign(el("a", "lawcite", cite), {href: url, target: "_blank", rel: "noopener"}) : el("span", "lawcite", cite))
+  row.append(d, el("div", "lawwords", words), right)
+  if (hover) row.title = hover
+  return row
+}
+function chartLaws() {
+  const {sums, five, long} = lawData()
+  const none = `No Exemption 3 laws listed for this selection in FY${hi}.`
+  const top = sums.slice(0, 5), rest = sums.slice(5), max = d3.max(sums, d => d.n), three = five.slice(0, 3)
+  const rows = top.map(d => {
+    const l = LD.laws[d.law], users = lawUsers(d.law), i = three.indexOf(d.law)
+    return lawRow({cite: lawCite(d.law), url: l.url, n: d.n, words: l.desc || lawTitle(d.law) || lawCite(d.law), max, dot: i >= 0 && lo !== hi ? SERIES[i] : null,
+      hover: [lawTitle(d.law), l.desc, users.length ? `Used by: ${users.join(", ")}` : ""].filter(Boolean).join("\n\n")})
+  })
+  if (rest.length) rows.push(lawRow({n: d3.sum(rest, d => d.n), words: `All other laws (${rest.length}): see the Tables tab`, max}))
+  const left = top.length ? html`<div class="lawlist">${rows}</div>` : note(none)
+  const names = three.map(lawCite), lines = long.filter(d => names.includes(d.law))
+  const right = !three.length ? note(none) : lo === hi ? note("Pick a range of years to see how these laws changed.")
+    : trend({data: lines, y: "n", z: "law", names, colors: SERIES.slice(0, names.length), height: Math.min(CH - 30, 360), yopt: {label: "Times relied on", tickFormat: axisNum, ticks: 5}, title: d => `${d.law}, FY${d.FY}: ${fmt(d.n)} times`})
+  return pair(figure(`Laws relied on most under Exemption 3, FY${hi}`, left), figure(`The ${names.length > 1 ? `top ${names.length}` : "law"} over time`, right))
+}
+function dataLaws() {
+  const {sums, five, long} = lawData()
+  const rows = sums.map(d => Object({Law: LD.laws[d.law].cite, "Title in the U.S. Code": LD.laws[d.law].title, "Times relied on": d.n,
+    "What it covers (agencies' words)": LD.laws[d.law].desc, "Used by": lawUsers(d.law).join("; "), Link: LD.laws[d.law].url}))
+  const text = (d, n) => d && d.length > n ? html`<span title="${d}">${d.slice(0, n - 1)}…</span>` : d
+  const a = caption(`Laws relied on under Exemption 3, FY${hi} (${who})`, rows.length ? Inputs.table(rows, {layout: "auto", maxHeight: TH - 60, columns: Object.keys(rows[0]).filter(k => k !== "Link"), format: {"Times relied on": num,
+    Law: (d, i, all) => all[i].Link ? html`<a href="${all[i].Link}" target="_blank" rel="noopener">${d}</a>` : text(d, 40), "Title in the U.S. Code": d => text(d, 46),
+    "What it covers (agencies' words)": d => text(d, 70), "Used by": d => text(d, 50)}}) : note(`No Exemption 3 laws listed for this selection in FY${hi}.`))
+  if (!five.length) return [a]
+  const names = five.map(lawCite)
+  const years = d3.groups(long, d => d.FY).sort((x, y) => x[0] - y[0]).map(([FY, v]) => Object.assign({FY}, Object.fromEntries(names.map(n => [n, (v.find(d => d.law === n) || {}).n ?? null]))))
+  return [a, caption(`Times relied on by year, ${who}, FY${lo}–FY${hi}`, plainTable(years, Object.fromEntries(names.map(n => [n, num]))))]
+}
+// the sentence at the top of the page
+function lawLine() {
+  const {sums, total: t} = lawData()
+  if (!sums.length) return ""
+  const top3 = d3.sum(sums.slice(0, 3), d => d.n)
+  const part = top3 / t > 0.995 ? "over 99%" : pct(top3 / t)
+  return sums.length > 3 ? `3 of ${sums.length} laws make up ${part} of the ${fmt(t)} times a law was relied on`
+    : `${sums.length === 1 ? "1 law was" : `${sums.length} laws were`} relied on ${fmt(t)} times`
+}
+lawGuide = () => "Exemption 3 covers information that another law protects from release. Click a citation to read the law."
+```
+
+```{ojs}
+//| output: false
+// ---------- Q5 appeals ----------
+reversalRate = (v, b) => {
+  const rev = d3.sum(v, d => d.partial) + d3.sum(v, d => d.reversed)
+  const den = b === "All processed appeals" ? d3.sum(v, d => d.total) : d3.sum(v, d => d.affirmed) + rev
+  return {rev, rate: den ? rev / den : null}
+}
+function q5data() {
+  const rows = pick(Q5)
+  const rate = byYear(d3.rollups(rows, v => Object.assign({FY: v[0].FY}, reversalRate(v, base5)), d => d.FY).map(d => d[1]))
+  const parts = d3.rollups(rows, v => APPEALS.map(([kind, c]) => Object({kind, n: total(v, d => d[c])})), d => d.FY).flatMap(([FY, arr]) => arr.map(o => Object.assign({FY}, o)))
+  return {rate, parts}
+}
+function chart5() {
+  const {rate, parts} = q5data()
+  // nothing reported is not a 0% rate: at some agencies one office decides every appeal (DOJ: OIP), so other components report none
+  if (!parts.some(d => d.n != null)) return pair(
+    figure("How often the first decision is reversed", note(`No appeals reported for this selection, ${lo === hi ? `FY${hi}` : `FY${lo}–FY${hi}`}. At some agencies one office decides all appeals, so other components report none.`)),
+    figure("Appeal outcomes (count)", note("Nothing to show.")))
+  const left = trend({data: rate, y: "rate", yopt: {label: "Reversal rate (%)", percent: true, domain: [0, 100]},  // percent: true, so the domain is in percent
+    title: d => `FY${d.FY}: ${pct(d.rate)} (${fmt(d.rev)} reversed fully or partly)`})
+  const right = Plot.plot({
+    height: CH, width: PAIR, marginLeft: 60, x: yearBand, y: {grid: true, label: "Appeals processed", tickFormat: axisNum},
+    color: {domain: APPEALS.map(a => a[0]), range: [SERIES[0], SERIES[3], SERIES[1], OTHER], legend: true},
+    marks: [Plot.barY(parts.filter(d => d.n != null), Plot.stackY({x: "FY", y: "n", fill: "kind", order: APPEALS.map(a => a[0]), tip: true, title: d => `${d.kind}, FY${d.FY}: ${fmt(d.n)}`}))]})
+  return pair(figure(`How often the first decision is reversed (out of ${base5 === "All processed appeals" ? "all processed appeals" : "appeals decided on the merits"})`, left),
+              figure("Appeal outcomes (count)", right))
+}
+function data5() {
+  const {rate, parts} = q5data()
+  const r = new Map(rate.map(d => [d.FY, d.rate]))
+  const rows = d3.groups(parts, d => d.FY).sort((a, b) => a[0] - b[0]).map(([FY, v]) =>
+    Object.assign({FY}, Object.fromEntries(v.map(d => [d.kind, d.n])), {"Reversal rate": r.get(FY) ?? null}))
+  return [caption(`${who}, FY${lo}–FY${hi} (reversal rate out of ${base5 === "All processed appeals" ? "all processed appeals" : "appeals decided on the merits"})`,
+    plainTable(rows, Object.assign(Object.fromEntries(APPEALS.map(a => [a[0], num])), {"Reversal rate": pctCell})))]
+}
+function table5() {
+  const rows = yearRows(Q5).filter(d => d.total > 0).map(d => Object({[NAME_COL]: rowName(d), "Appeals processed": d.total, Affirmed: d.affirmed,
+    "Partly reversed": d.partial, "Fully reversed": d.reversed, "Closed for other reasons": d.other, "Reversal rate": reversalRate([d], base5).rate}))
+  return table(rows, {header: {"Appeals processed": "Processed", "Partly reversed": "Partly rev.", "Fully reversed": "Fully rev.", "Closed for other reasons": "Closed, other"},
+    format: {"Appeals processed": num, Affirmed: num, "Partly reversed": num, "Fully reversed": num, "Closed for other reasons": num, "Reversal rate": pctCell}})
+}
+```
+
+```{ojs}
+//| output: false
+// ---------- Q6 backlog vs intake ----------
+// growth from the year before, counting only agencies (or components) with a value in both years
+function growth(rows, f) {
+  const key = d => `${d.level}|${d.Agency}|${d.Key}`
+  const by = d3.group(rows.filter(d => f(d) != null), d => d.FY)
+  return byYear([...by].filter(([FY]) => by.has(FY - 1)).map(([FY, v]) => {
+    const prev = new Map(by.get(FY - 1).map(d => [key(d), f(d)]))
+    const both = v.filter(d => prev.has(key(d)))
+    const before = d3.sum(both, d => prev.get(key(d)))
+    return Object({FY, growth: before ? d3.sum(both, f) / before - 1 : null, n: both.length})
+  }))
+}
+function q6data() {
+  const rows = Q3.filter(d => d.FY >= lo - 1 && d.FY <= hi && inSel(d))  // one year earlier, for the first year's growth
+  const gB = growth(rows, d => d.backlog).filter(d => d.FY >= lo)
+  const gR = growth(rows, d => d.received).filter(d => d.FY >= lo)
+  const levels = byYear(d3.rollups(rows.filter(d => d.FY >= lo), v => Object({FY: v[0].FY, backlog: total(v, d => d.backlog), received: total(v, d => d.received)}), d => d.FY).map(d => d[1]))
+  // who holds the backlog in the last year chosen: the 10 largest agencies (or components), alphabetical, plus the rest
+  let share = null
+  if (comp === ALL) {
+    const pool = Q3.filter(d => d.FY === hi && d.backlog != null && (agency === TOTAL ? d.level === "agency" && (!cohortOnly || d.cohort) : d.level === "component" && d.Agency === agency))
+    const tot = agency === TOTAL ? d3.sum(pool, d => d.backlog) : (Q3.find(d => d.level === "agency" && d.Agency === agency && d.FY === hi) || {}).backlog
+    if (pool.length && tot) {
+      const top = pool.slice().sort((a, b) => b.backlog - a.backlog).slice(0, 10)
+      const rest = d3.sum(pool.filter(d => !top.includes(d)), d => d.backlog), diff = tot - d3.sum(pool, d => d.backlog)
+      share = top.map(d => Object({name: agency === TOTAL ? d.Agency : `${d.Name} (${d.Component})`, n: d.backlog, share: d.backlog / tot}))
+        .sort((a, b) => d3.ascending(a.name, b.name))
+      if (rest > 0) share.push(Object({name: agency === TOTAL ? "All other agencies" : "Other components", n: rest, share: rest / tot, other: true}))
+      if (diff >= 1) share.push(Object({name: "(Agency total minus components)", n: diff, share: diff / tot, other: true}))
+    }
+  }
+  return {gB, gR, levels, share}
+}
+function chart6() {
+  const {gB, gR, levels, share} = q6data()
+  const long = [...gB.map(d => Object.assign({kind: "Backlog"}, d)), ...gR.map(d => Object.assign({kind: "Requests received"}, d))].filter(d => d.growth != null)
+  // growth from a very small base (e.g. a backlog of 20 becoming 2,700) would flatten every other year: cut the axis at +300%
+  const big = lo !== hi && long.some(d => d.growth > 3)
+  const left0 = trend({data: long, y: "growth", z: "kind", names: ["Backlog", "Requests received"], colors: SERIES.slice(0, 2), clip: big,
+    yopt: Object.assign({label: "Change from the year before (%)", percent: true}, big ? {domain: [Math.min(0, d3.min(long, d => d.growth)) * 100, 300]} : {}),  // percent: true, so the domain is in percent
+    rules: [Plot.ruleY([0], {stroke: "#888"})],
+    title: d => `${d.kind}, FY${d.FY - 1}→FY${d.FY}: ${d3.format("+.1%")(d.growth)}${agency === TOTAL ? ` (${d.n} agencies in both years)` : ""}`})
+  const ratio = levels.filter(d => d.backlog != null && d.received).map(d => Object({FY: d.FY, r: d.backlog / d.received}))
+  const right = share
+    ? figure(agency === TOTAL ? `Share of the backlog, FY${hi}: the 10 largest agencies` : `Share of ${agency}'s backlog, FY${hi}`, Plot.plot({
+        height: CH, width: PAIR, marginLeft: 230, x: {grid: true, label: "Share of the backlog (%)", percent: true},
+        y: {domain: share.map(d => d.name), label: null, tickFormat: shortName},
+        marks: [Plot.barX(share, {x: "share", y: "name", fill: d => d.other ? OTHER : BRAND, tip: true, title: d => `${d.name}: ${fmt(d.n)} (${d3.format(".1%")(d.share)})`})]}))
+    : figure("Backlog ÷ requests received", trend({data: ratio, y: "r", yopt: {label: "Backlog per request received"}, title: d => `FY${d.FY}: ${d.r.toFixed(2)}`}))
+  const left = big ? html`<div>${left0}<div class="side-note">Changes above +300% (small starting numbers) are off the chart; the Tables tab has every value.</div></div>` : left0
+  return pair(figure("Backlog vs requests received: change from the year before", left), right)
+}
+function data6() {
+  const {gB, gR, levels, share} = q6data()
+  const b = new Map(gB.map(d => [d.FY, d])), r = new Map(gR.map(d => [d.FY, d]))
+  const rows = levels.map(d => Object({FY: d.FY, Backlog: d.backlog, "Requests received": d.received,
+    "Backlog change": b.get(d.FY)?.growth ?? null, "Received change": r.get(d.FY)?.growth ?? null,
+    "Backlog ÷ received": d.backlog != null && d.received ? d.backlog / d.received : null,
+    [agency === TOTAL ? "Agencies in both years" : "Compared"]: b.get(d.FY)?.n ?? null}))
+  const ch = d => d == null ? "" : d3.format("+.1%")(d)
+  const out = [caption(`${who}, FY${lo}–FY${hi} (change: same agencies in both years)`, plainTable(rows, {Backlog: num, "Requests received": num,
+    "Backlog change": ch, "Received change": ch, "Backlog ÷ received": d => d == null ? "" : d.toFixed(2), "Agencies in both years": num, Compared: num}))]
+  if (share) out.push(caption(`Share of the backlog, FY${hi}`, Inputs.table(share.map(d => Object({[agency === TOTAL ? "Agency" : "Component"]: d.name, Backlog: d.n, Share: d.share})),
+    {layout: "auto", format: {Backlog: num, Share: d => d3.format(".1%")(d)}})))
+  return out
+}
+function table6() {
+  const key = d => `${d.level}|${d.Agency}|${d.Key}`
+  const prev = new Map(Q3.filter(d => d.FY === hi - 1).map(d => [key(d), d]))
+  const ch = (a, b) => a != null && b ? a / b - 1 : null
+  const rows = yearRows(Q3).filter(d => d.backlog != null || d.received != null).map(d => {
+    const p = prev.get(key(d)) || {}
+    return {[NAME_COL]: rowName(d), [`Backlog FY${hi - 1}`]: p.backlog ?? null, [`Backlog FY${hi}`]: d.backlog,
+            "Backlog change": ch(d.backlog, p.backlog), "Received change": ch(d.received, p.received),
+            "Backlog ÷ received": d.backlog != null && d.received ? d.backlog / d.received : null}
+  })
+  const c = d => d == null ? "" : d3.format("+.0%")(d)
+  return table(rows, {format: {[`Backlog FY${hi - 1}`]: num, [`Backlog FY${hi}`]: num, "Backlog change": c, "Received change": c,
+    "Backlog ÷ received": d => d == null ? "" : d.toFixed(2)}})
+}
+```
+
+```{ojs}
+//| output: false
+// ---------- Explore: any measure ----------
+xval = d => V[xcol][d.i]
+function xdata() {
+  const info = COL.get(xcol)
+  const rows = pick(ROWS).filter(d => xval(d) != null)
+  const series = agency === TOTAL && !info.addable ? null
+    : byYear(d3.rollups(rows, v => Object({FY: v[0].FY, value: d3.sum(v, xval), n: v.length, lt1: v.length === 1 && lt1(v[0].i, xcol)}), d => d.FY).map(d => d[1]))
+  // coverage: how many agencies (or components of the agency) report this measure each year
+  const scope = ROWS.filter(d => d.FY >= lo && d.FY <= hi && (agency === TOTAL ? d.level === "agency" && (!cohortOnly || d.cohort) : d.level === "component" && d.Agency === agency))
+  const cover = byYear(d3.rollups(scope, v => Object({FY: v[0].FY, with: v.filter(d => xval(d) != null).length, all: v.length}), d => d.FY).map(d => d[1]))
+  return {info, series, cover, unit: agency === TOTAL ? "agencies" : "components"}
+}
+function chartX() {
+  const {info, series, cover, unit} = xdata()
+  const left = series === null
+    ? note("This measure is a median, average or day count that each agency reports for itself, so it cannot be added up into a government total. Pick an agency, or compare agencies in the Tables tab.")
+    : series.length ? trend({data: series, y: "value", yopt: {label: info.label, tickFormat: axisNum},
+        title: d => `FY${d.FY}: ${d.lt1 ? "<1" : fmt(d.value)}${agency === TOTAL ? ` (${d.n} agencies)` : ""}`})
+      : note("Nothing reported for this selection and these years.")
+  const right = figure(agency === TOTAL ? "Agencies reporting this measure" : `Components of ${agency} reporting this measure`, cover.length ? Plot.plot({
+    height: CH, width: PAIR, marginLeft: 50, x: yearBand, y: {grid: true, label: agency === TOTAL ? "Agencies" : "Components"},
+    marks: [Plot.barY(cover, {x: "FY", y: "all", fill: "#e3e7ee"}),
+            Plot.barY(cover, {x: "FY", y: "with", fill: BRAND, tip: true, title: d => `FY${d.FY}: ${d.with} of ${d.all} report a value`})]})
+    : note("This agency reports no separate components."))
+  const title = agency === TOTAL ? (info.addable ? "Government total (agencies added up)" : "Government total") : comp === ALL ? `${agency}: agency total` : who
+  return pair(figure(title, left), right)
+}
+function dataX() {
+  const {info, series, cover, unit} = xdata()
+  const s = new Map((series || []).map(d => [d.FY, d]))
+  const rows = d3.range(lo, hi + 1).filter(FY => s.has(FY) || cover.some(c => c.FY === FY)).map(FY => {
+    const d = s.get(FY), c = cover.find(c => c.FY === FY)
+    const r = {FY, [info.label]: d ? d.value : null}
+    if (agency === TOTAL && series) r["Agencies added up"] = d ? d.n : null
+    if (c) r[`${unit[0].toUpperCase() + unit.slice(1)} reporting`] = `${c.with} of ${c.all}`
+    r.lt1 = {[info.label]: d ? d.lt1 : false}
+    return r
+  })
+  return [caption(`${info.type} › ${info.label}: ${who}, FY${lo}–FY${hi}`,
+    plainTable(rows, {[info.label]: daysCell(info.label), "Agencies added up": num}))]
+}
+function tableX() {
+  const info = COL.get(xcol)
+  const key = d => `${d.level}|${d.Agency}|${d.Key}`
+  const atLo = new Map(ROWS.filter(d => d.FY === lo).map(d => [key(d), d]))
+  const cLo = `FY${lo}`, cHi = `FY${hi}`
+  const rows = yearRows(ROWS).map(d => {
+    const old = atLo.get(key(d))
+    return {[NAME_COL]: rowName(d), [cLo]: old ? xval(old) : null, [cHi]: xval(d), lt1: {[cLo]: old ? lt1(old.i, xcol) : false, [cHi]: lt1(d.i, xcol)}}
+  }).filter(r => r[cLo] != null || r[cHi] != null)
+  // agency total minus its components: 0 unless the report has numbers no component carries, or its total and components disagree
+  if (agency !== TOTAL && info.addable) {
+    const gap = c => {
+      const part = rows.filter(r => r[NAME_COL] !== "(Agency total)" && r[c] != null)
+      const tot = rows.find(r => r[NAME_COL] === "(Agency total)")
+      // rounded to the data's 4 decimals: adding up staff and dollar amounts leaves float noise (about 1e-8), which is 0
+      return tot && tot[c] != null && part.length ? Math.round((tot[c] - d3.sum(part, r => r[c])) * 1e4) / 1e4 || 0 : null
+    }
+    const g = {[NAME_COL]: "(Agency total minus components)", [cLo]: gap(cLo), [cHi]: gap(cHi), lt1: {}}
+    if (g[cLo] || g[cHi]) rows.push(g)
+  }
+  const cols = lo === hi ? [NAME_COL, cHi] : [NAME_COL, cLo, cHi]
+  return table(rows.map(r => Object.assign(Object.fromEntries(cols.map(c => [c, r[c]])), {lt1: r.lt1})),
+               {format: Object.fromEntries(cols.slice(1).map(c => [c, daysCell(c)]))})
+}
+```
+
+```{ojs}
+//| output: false
+// ---------- key measure of each question: used by the overview and by "Compare with" ----------
+CX = BUCKETS.map(k => `17_ComplexRequests__TimeIncrementProcessedQuantity[${k}]`)
+val = (d, c) => V[c][d.i]
+ratio = (a, b) => a != null && b ? a / b : null
+KEY = [null,
+  {q: 1, label: "Requests received", f: v => total(v, d => val(d, F.received))},
+  {q: 2, label: "Complex requests done within 20 working days", pct: true,
+   f: v => ratio(total(v, d => val(d, CX[0])), total(v, d => d3.sum(CX, c => val(d, c))))},
+  {q: 3, label: "Backlogged requests", f: v => total(v, d => val(d, F.backlog))},
+  {q: 4, label: "Full grants (share of processed)", pct: true,
+   f: v => ratio(total(v, d => val(d, OUTCOME_COL["Full grant"])), total(v, d => d3.sum(OUTCOMES, c => val(d, OUTCOME_COL[c]))))},
+  {q: 5, label: `Appeals reversed fully or partly (of ${base5 === "All processed appeals" ? "all processed" : "those decided on the merits"})`, pct: true, f: v => {
+    const p = total(v, d => val(d, F.partial)), r = total(v, d => val(d, F.reversed))
+    if (p == null && r == null) return null
+    const rev = (p ?? 0) + (r ?? 0)
+    return ratio(rev, base5 === "All processed appeals" ? total(v, d => val(d, F.total)) : (total(v, d => val(d, F.affirmed)) ?? 0) + rev)
+  }},
+  {q: 6, label: "Backlog ÷ requests received", f: v => ratio(total(v, d => val(d, F.backlog)), total(v, d => val(d, F.received)))}]
+// Explore: the chosen measure (medians and other non-addable measures only for a single agency or component)
+keyFor = q => q === 7 ? {label: COL.get(xcol).label, f: v => COL.get(xcol).addable || v.length === 1 ? total(v, xval) : null} : q === 3 ? STAFF_KEY : KEY[q]
+keyText = (k, x) => x == null ? "–" : k.pct ? d3.format(".1%")(x) : k.q === 6 ? x.toFixed(2) : k.whole ? fmt(Math.round(x)) : fmt(Math.round(x * 100) / 100)
+// with "Compare with", the right chart compares this measure (Explore: the chosen measure in the last year)
+KEY2 = Object({
+  1: {label: "Processed as a share of received", pct: true, f: v => ratio(total(v, d => val(d, F.processed)), total(v, d => val(d, F.received)))},
+  2: {label: "Simple requests done within 20 working days", pct: true, f: simpleShare},
+  3: {label: "Total cost ($)", whole: true, f: v => total(v, d => val(d, F.total_costs))},
+  4: {label: "Full denials based on exemptions (share of processed)", pct: true,
+      f: v => ratio(total(v, d => val(d, OUTCOME_COL["Full denial (exemptions)"])), total(v, d => d3.sum(OUTCOMES, c => val(d, OUTCOME_COL[c]))))},
+  5: {label: "Appeals processed", whole: true, f: v => total(v, d => val(d, F.total))},
+  6: {label: "Backlogged requests", whole: true, f: v => KEY[3].f(v)}})
+// reference for rates and ratios: the government-wide figure for an agency, the agency's total for a component
+// (counts are not given a reference: an agency's count and the government's are on different scales)
+REF_NAME = agency === TOTAL ? null : comp === ALL ? "All agencies (reference)" : compareWith.includes(`A|${agency}`) ? null : `${agency} total (reference)`
+REF_COLOR = "#9aa0a6"
+hasRef = k => REF_NAME != null && (k.pct || k.q === 6)
+// one series per entity: the current selection first, then the "Compare with" list, then the reference
+function compareSeries(k) {
+  const groups = [{name: compareName.sel, rows: pick(ROWS)}, ...compareList.map(key => Object({name: compareName.of(key), rows: entityRows(key)}))]
+  if (hasRef(k)) groups.push({name: REF_NAME, ref: true,
+    rows: ROWS.filter(d => d.FY >= lo && d.FY <= hi && d.level === "agency" && (comp === ALL || d.Agency === agency))})
+  return groups.flatMap(g => d3.groups(g.rows, d => d.FY).map(([FY, v]) => Object({FY, name: g.name, ref: !!g.ref, value: k.f(v)})).filter(d => d.value != null))
+    .sort((a, b) => a.FY - b.FY)
+}
+// what is compared, without the selection itself. Series are told apart by name, and several agencies have a component
+// of the same name (e.g. an "OIG"), so a name that appears twice gets its agency
+selKey = agency === TOTAL ? "" : comp === ALL ? `A|${agency}` : `C|${agency}|${comp}`
+compareList = compareWith.filter(k => k !== selKey)
+compareName = (() => {
+  const shorts = [selName, ...compareList.map(k => ENT.get(k).short)]
+  const tag = (a, s) => shorts.filter(x => x === s).length > 1 ? `${a} › ${(s.match(/\(([^)]+)\)$/) || [null, s])[1]}` : s
+  return {sel: tag(agency, selName), of: k => tag(k.split("|")[1], ENT.get(k).short)}
+})()
+compareNames = [compareName.sel, ...compareList.map(compareName.of)]
+seriesNames = k => [...compareNames, ...(hasRef(k) ? [REF_NAME] : [])]
+function compareFig(k, w, h, legend, lastYear = false) {
+  const s = compareSeries(k).filter(d => !lastYear || d.FY === hi), names = seriesNames(k)
+  const color = {domain: names, range: [...SERIES.slice(0, compareNames.length), ...(hasRef(k) ? [REF_COLOR] : [])], legend}
+  const title = d => `${d.name}, FY${d.FY}: ${keyText(k, d.value)}`
+  if (lo === hi || lastYear) {
+    // a single year: bars side by side (a line would be one dot)
+    return Plot.plot({height: Math.max(h, 40 + 26 * names.length), width: w, marginLeft: Math.min(220, 12 + 6.2 * d3.max(names, n => Math.min(n.length, 34))),
+      x: k.pct ? {grid: true, percent: true, label: `FY${hi} (%)`} : {grid: true, label: `FY${hi}`, tickFormat: k.q === 6 ? d => d.toFixed(2) : axisNum},
+      y: {domain: names, label: null, tickFormat: n => n.length > 34 ? n.slice(0, 33) + "…" : n}, color,
+      marks: [Plot.barX(s, {x: "value", y: "name", fill: "name", tip: true, title})]})
+  }
+  const yAxis = k.pct ? {grid: true, percent: true, label: "%"} : {grid: true, label: null, tickFormat: k.q === 6 ? d => d.toFixed(2) : axisNum}
+  // two years: bars side by side, as in trend()
+  if (hi - lo === 1) return Plot.plot({height: h, width: w, marginLeft: 60, fx: TWO_YEARS, x: {axis: null, domain: names}, y: Object.assign({nice: true}, yAxis), color,
+    marks: [Plot.barY(s, {fx: "FY", x: "name", y: "value", fill: "name", tip: true, title}), Plot.ruleY([0])]})
+  return Plot.plot({height: h, width: w, marginLeft: 60, x: Object.assign({}, yearX, {label: null}), y: yAxis, color,
+    marks: [Plot.lineY(withGaps(s.filter(d => !d.ref), "value", "name"), {x: "FY", y: "value", stroke: "name", strokeWidth: 2}),
+            Plot.lineY(withGaps(s.filter(d => d.ref), "value", "name"), {x: "FY", y: "value", stroke: "name", strokeWidth: 1.5, strokeDasharray: "5,4"}),
+            Plot.dot(s, {x: "FY", y: "value", fill: "name", r: 2.5, tip: true, title})]})
+}
+// with a "Compare with" list, both charts of a view compare what is selected
+withCompare = (q, el) => {
+  if (!compareWith.length) return el
+  const k = keyFor(q), k2 = KEY2[q]
+  return pair(figure(`Compare: ${k.label}`, compareFig(k, PAIR, CH, true)),
+    k2 ? figure(`Compare: ${k2.label}`, compareFig(k2, PAIR, CH, true)) : figure(`Compare, FY${hi}: ${k.label}`, compareFig(k, PAIR, CH, true, true)))
+}
+function compareTable(k) {
+  const s = compareSeries(k)
+  const names = seriesNames(k)
+  const rows = d3.groups(s, d => d.FY).map(([FY, v]) => Object.assign({FY}, Object.fromEntries(names.map(n => [n, (v.find(d => d.name === n) || {}).value ?? null]))))
+  return caption(`Compare: ${k.label}, FY${lo}–FY${hi}`, plainTable(rows, Object.fromEntries(names.map(n => [n, x => x == null ? "" : keyText(k, x)]))))
+}
+SIMPLE_B = BUCKETS.map(k => `16_SimpleRequests__TimeIncrementProcessedQuantity[${k}]`)
+simpleShare = v => ratio(total(v, d => val(d, SIMPLE_B[0])), total(v, d => d3.sum(SIMPLE_B, c => val(d, c))))
+// both ways of counting the reversal rate: they answer different questions, and the team has not settled on one
+appealRates = () => {
+  const v = Q5.filter(d => d.FY === hi && inSel(d))
+  return {merits: reversalRate(v, "Appeals decided on the merits").rate, all: reversalRate(v, "All processed appeals").rate}
+}
+// one sentence with the numbers of the last year chosen, shown under the question
+function glance(q) {
+  const at = FY => ROWS.filter(d => d.FY === FY && inSel(d))
+  const now = at(hi), before = at(hi - 1)
+  const sumOf = (v, c) => total(v, d => val(d, c))
+  const chg = (a, b) => a != null && b ? ` (${d3.format("+.1%")(a / b - 1)} vs FY${hi - 1})` : ""
+  const p = x => x == null ? "–" : pct(x)
+  if (q === 1) {
+    const r = sumOf(now, F.received), pr = sumOf(now, F.processed)
+    return r == null ? "" : `${fmt(r)} requests received${chg(r, sumOf(before, F.received))}; processed equal to ${p(ratio(pr, r))} of them`
+  }
+  if (q === 2) {
+    const sim = simpleShare(now), cx = KEY[2].f(now)
+    return sim == null && cx == null ? "" : `${p(sim)} of simple and ${p(cx)} of complex requests done within 20 working days`
+  }
+  if (q === 3) {
+    const b = sumOf(now, F.backlog), st = sumOf(now, F.staff), co = sumOf(now, F.total_costs)
+    return `backlog ${b == null ? "–" : fmt(b)}; ${st == null ? "–" : fmt(Math.round(st))} FOIA staff${chg(st, sumOf(before, F.staff))}; total cost ${co == null ? "–" : "$" + d3.format(".3~s")(co).replace("G", "B")}`
+  }
+  if (q === 4 && lawsOn) return lawLine()
+  if (q === 4) {
+    const ex = EXEMPTIONS.map(e => [e, sumOf(now, `05_Exemptions__AppliedExemptionQuantity[${e}]`) || 0]).sort((a, b) => b[1] - a[1])[0]
+    return `${KEY[4].f(now) == null ? "–" : d3.format(".1%")(KEY[4].f(now))} of processed requests fully granted${ex && ex[1] ? `; most used exemption: ${exName(ex[0])} (${fmt(ex[1])} times)` : ""}`
+  }
+  if (q === 5) {
+    const {merits, all} = appealRates()
+    if (merits == null) return all == null ? "" : "no appeals were decided on the merits"
+    return `${p(merits)} of appeals decided on the merits were reversed fully or partly, which is ${p(all)} of all processed appeals`
+  }
+  if (q === 6) {
+    const {gB, gR} = q6data(), b = gB.find(d => d.FY === hi), r = gR.find(d => d.FY === hi)
+    return b && r && b.growth != null && r.growth != null ? `backlog ${d3.format("+.1%")(b.growth)}, requests received ${d3.format("+.1%")(r.growth)} compared with FY${hi - 1}${agency === TOTAL ? " (same agencies in both years)" : ""}` : ""
+  }
+  if (q === 7) {
+    const k = keyFor(7), x = k.f(now)
+    return x == null ? "" : `${COL.get(xcol).label}: ${keyText(k, x)}${COL.get(xcol).addable ? chg(x, k.f(before)) : ""}`
+  }
+  return ""
+}
+// the start page: the same selection told as the six steps of the story
+STAFF_KEY = Object({q: 0, label: "FOIA staff", whole: true, f: v => total(v, d => val(d, F.staff))})
+storyKey = id => id === 6 ? KEY[3] : id === 3 ? STAFF_KEY : KEY[id]
+function storyLine(id) {
+  const now = ROWS.filter(d => d.FY === hi && inSel(d))
+  const sumOf = c => total(now, d => val(d, c))
+  const p = x => x == null ? "–" : pct(x)
+  if (id === 1) {
+    const r = sumOf(F.received), pr = sumOf(F.processed)
+    return r == null ? "" : `Processed equal to ${p(ratio(pr, r))} of requests received.`
+  }
+  if (id === 2) { const sim = simpleShare(now); return sim == null ? "" : `${p(sim)} of simple requests were done within 20 working days.` }
+  if (id === 4) {
+    const ex = EXEMPTIONS.map(e => [e, sumOf(`05_Exemptions__AppliedExemptionQuantity[${e}]`) || 0]).sort((a, b) => b[1] - a[1])[0]
+    return ex && ex[1] ? `Most used exemption: ${exName(ex[0])}.` : ""
+  }
+  if (id === 5) {
+    const {merits, all} = appealRates(), other = base5 === "All processed appeals" ? ["decided on the merits", merits] : ["all processed appeals", all]
+    if (merits == null) return all == null ? "" : "No appeals were decided on the merits."
+    return other[1] == null ? "" : `${p(other[1])} when counted out of ${other[0]}.`
+  }
+  if (id === 6) {
+    const {gB, gR} = q6data(), b = gB.find(d => d.FY === hi), r = gR.find(d => d.FY === hi)
+    return b && r && b.growth != null && r.growth != null ? `Backlog ${d3.format("+.1%")(b.growth)}, requests received ${d3.format("+.1%")(r.growth)} vs FY${hi - 1}${agency === TOTAL ? " (same agencies in both years)" : ""}.` : ""
+  }
+  if (id === 3) {
+    const co = sumOf(F.total_costs)
+    return co == null ? "" : `Total cost $${d3.format(".3~s")(co).replace("G", "B")}, not adjusted for inflation.`
+  }
+  return ""
+}
+openStep = id => {
+  document.querySelector(`.qbtn[data-id="${id}"]`).click()
+  document.querySelector(".nav-tabs .nav-link")?.click()
+}
+function overview() {
+  const at = FY => ROWS.filter(d => d.FY === FY && inSel(d))  // not limited to the chosen years: the cards compare with the year before
+  const cols = MAIN < 900 ? 2 : 3
+  const w = Math.floor((MAIN - 20) / cols) - 30, h = Math.max(96, Math.floor((CH - 130) / 2))
+  const cards = STORY.map((id, i) => {
+    const k = storyKey(id)
+    const now = k.f(at(hi)), before = k.f(at(hi - 1))
+    // the backlog step gives its change in the sentence (same agencies in both years), not here
+    const chg = id === 6 ? "" : now == null ? (at(hi).length ? "not reported" : `no FY${hi} report`) : before == null ? ""
+      : k.pct ? `${d3.format("+.1f")((now - before) * 100)} pts vs FY${hi - 1}` : before ? `${d3.format("+.1%")(now / before - 1)} vs FY${hi - 1}` : ""
+    const card = html`<div class="tile step" tabindex="0" role="button" aria-label="Open step ${i + 1}: ${QUESTIONS[id - 1].short}">
+      <div class="tstep"><span class="tno">${i + 1}</span>${QUESTIONS[id - 1].short}<span class="topen">Open →</span></div>
+      <div class="tlabel">${k.label}</div>
+      <div class="tvalrow"><span class="tval">${keyText(k, now)}</span><span class="tchg">${chg}</span></div>
+      <div class="tline">${storyLine(id)}</div>
+      ${compareFig(k, w, h, false)}</div>`
+    card.onclick = () => openStep(id)
+    card.onkeydown = e => { if (e.key === "Enter") openStep(id) }
+    return card
+  })
+  const names = [...compareNames, ...(REF_NAME ? [REF_NAME] : [])]
+  const legend = Plot.legend({color: {domain: names, range: [...SERIES.slice(0, compareNames.length), ...(REF_NAME ? [REF_COLOR] : [])]}})
+  return html`<div class="overview">${names.length > 1 ? legend : ""}<div class="story" style="grid-template-columns:repeat(${cols}, minmax(0, 1fr))">${cards}</div>
+    <p class="side-note">Numbers: FY${hi}, ${selName}, as reported by the agencies. Charts: FY${lo}–FY${hi}.${REF_NAME ? ` Grey dashed line: ${REF_NAME.replace(" (reference)", "")}, for rates only.` : ""} Pick any agency or component on the left to read the same six steps for it.</p></div>`
+}
+```
+
+```{ojs}
+//| output: false
+// ---------- Tables tab: chart data / more data types / compare agencies ----------
+// data types shown under "More data types" for each question (all 31 types are reachable)
+RELATED = Object({1: ["01", "29", "19", "27", "28"], 2: ["14", "15", "16", "17", "18", "04", "20"], 3: ["26", "30", "22", "23", "21"],
+                  4: ["02", "05", "03", "24", "25"], 5: ["07", "08", "09", "10", "11", "12", "13", "31", "32"], 6: ["26", "30", "01", "19"]})
+// one data type, one row per fiscal year, for the current selection (government total: counts added up)
+function typeTable(no) {
+  const cols = COLS.filter(c => c.no === no)
+  const show = agency === TOTAL ? cols.filter(c => c.addable) : cols
+  const head = c => c.label.replace(/ (Quantity|Value)\b/g, "")
+  const rows = d3.groups(pick(ROWS), d => d.FY).sort((a, b) => a[0] - b[0]).map(([FY, v]) => {
+    const r = {FY, lt1: {}}
+    for (const c of show) {
+      const xs = v.filter(d => V[c.key][d.i] != null)
+      r[head(c)] = xs.length ? d3.sum(xs, d => V[c.key][d.i]) : null
+      if (xs.length === 1 && lt1(xs[0].i, c.key)) r.lt1[head(c)] = true
+    }
+    return r
+  })
+  const dropped = cols.length - show.length
+  return html`<div>${plainTable(rows, Object.fromEntries(show.map(c => [head(c), daysCell(head(c))])))}${dropped
+    ? html`<p class="side-note">${dropped} median, average or day columns are not added up across agencies: pick an agency to see them.</p>` : ""}</div>`
+}
+function moreView(q) {
+  const list = q === 7 ? [xtype] : RELATED[q]
+  const s = Inputs.select(list, {label: "Data type", format: typeName, value: list.includes(window.__moreType) ? window.__moreType : list[0]})
+  const holder = html`<div></div>`
+  const show = () => { window.__moreType = s.value; holder.replaceChildren(caption(`${typeName(s.value)}: ${who}, FY${lo}–FY${hi}`, typeTable(s.value))) }
+  s.addEventListener("input", show)
+  show()
+  return html`<div>${s}${holder}</div>`
+}
+function tablePanel(q) {
+  const views = [["chart", "Numbers in the chart"], ["more", "Related report tables"], ["compare", agency === TOTAL ? `All agencies, FY${hi}` : `All components, FY${hi}`]]
+  const bar = html`<div class="tview">${views.map(([k, l]) => html`<button type="button" class="tvbtn" data-k="${k}">${l}</button>`)}</div>`
+  const holder = html`<div class="tholder"></div>`
+  const build = {
+    chart: () => q === 4 && lawsOn ? dataLaws() : [...[data1, data2, data3, data4, data5, data6, dataX][q - 1](), ...(compareWith.length ? [keyFor(q), KEY2[q]].filter(Boolean).map(compareTable) : [])],
+    more: () => [moreView(q)],
+    compare: () => [caption(agency === TOTAL ? `Every agency, FY${hi}` : `${agency}: agency total and components, FY${hi}`,
+                            [table1, table2, table3, table4, table5, table6, tableX][q - 1]())]}
+  const show = k => {
+    window.__tableView = k  // remembered while the page is open
+    for (const b of bar.querySelectorAll("button")) b.classList.toggle("on", b.dataset.k === k)
+    holder.replaceChildren(...build[k]())
+  }
+  bar.addEventListener("click", e => { const b = e.target.closest("button"); if (b) show(b.dataset.k) })
+  show(window.__tableView || "chart")
+  return html`<div class="tpanel">${bar}${holder}</div>`
+}
+```
+
+```{ojs}
+//| output: false
+// ---------- notes: how each comparison is made, and what the client should decide ----------
+RULES = md`<br>**Rules used everywhere**
+
+- Agency rows only for totals: the "All agencies" row in foia.gov's files is not added on top, and components are never added to their own agency's total.
+- A blank or "N/A" is shown as missing, never as 0. "<1" (less than a day) is shown as "<1".
+- Days are working days unless a table says otherwise (DOJ's handbook for the annual reports, current edition). Decisions on expedited processing are counted in calendar days.
+- Totals and rates across agencies add the counts first, then divide (never an average of agency rates).
+- Medians cannot be added, so they are shown agency by agency (or component by component).
+- ${agencyNames.length} agencies report in some years; only ${N_COHORT} report in all ${N_YEARS}. "Agencies added up in the total" can keep the same ${N_COHORT} every year.
+- With one or two years chosen, trend charts become bars (a line would be a single dot or one straight segment). With "Compare with", both charts compare what is selected, and the Tables tab has their numbers.
+- Tables tab: **Numbers in the chart** = the numbers behind the charts (and the comparison, if any); **Related report tables** = the annual report's other tables on this topic, for the same selection and years; **All agencies** = every agency (or the chosen agency's components) in the last year chosen, listed alphabetically.`
+NOTES = [
+  md`- **Received vs processed**: when processed is below received, the agency falls further behind that year (FY2025: processed = 96% of received).
+- **Total over time**: reporting agencies grew from ${PER_YEAR.get(FY_FIRST)} (FY${FY_FIRST}) to ${PER_YEAR.get(FY_LAST)} (FY${FY_LAST}), so part of the growth is more agencies reporting. Keeping only the ${N_COHORT} agencies that reported all ${N_YEARS} years removes that.
+- **Agencies and components** are compared on counts and on their share (of all federal requests, or of their agency's requests). DHS received about 60% of all requests in FY2025, so the total mostly follows DHS.
+
+**For the client to decide:** totals for all reporting agencies, or for the ${N_COHORT} with all ${N_YEARS} years?`,
+  md`- **Day ranges** (≤20 working days, 21–40, … 401+) are counts, so they can be added across agencies (left chart, grouped into six bands; the Tables tab has all 13 ranges). FY2025: 71% of simple, 23% of complex and 61% of expedited requests were processed within 20 working days.
+- **Medians** are reported per agency or component and cannot be added or averaged, so they are shown side by side (the 15 agencies that processed the most), or over time for one agency or component. In that chart (simple and complex requests, FY2025), one median is over 1,000 days (National Archives, complex: 1,384), so it uses a log-like scale.
+- Simple, complex and expedited requests are always shown separately.
+
+**For the client to decide:** is "share processed within 20 working days" (the basic legal time limit) the headline measure?`,
+  md`- **One scale**: backlog, requests, staff and cost are indexed (first year = 100) instead of using two axes. FY2025: backlog 339,759 (2.6× FY2008), staff 4,824, cost $662M (not adjusted for inflation). The lines move together; this does not show cause.
+- **Revised numbers**: in 182 agency-years the next report gives a different backlog for the same year. The right chart shows both versions; the last year has no revision yet.
+- **Agencies** are compared with ratios in the table (backlog ÷ requests received, processed per staff, cost per processed request), so small and large agencies can be compared.
+
+**For the client to decide:** backlog as first reported or as revised? Adjust cost for inflation?`,
+  md`- **Outcomes** are shares of processed requests. Full grants: 41.6% (FY2008) → 9.5% (FY2025). Part of this is DHS's growing share (19% → 61% of processed requests); without DHS, 49% → 21%.
+- **Base** = the outcome categories added up. In FY2025, Agriculture, Commerce, Labor and Veterans Affairs report a "Total" that does not match their categories (VA: "Total" 18,334, categories 123,103 = requests processed); foia.gov's file has the same numbers.
+- **Exemptions** count times applied, not requests (one request can use several). FY2025: Ex. 6 567k, Ex. 7(C) 395k, Ex. 7(E) 369k. The laws behind Exemption 3 have their own view (button above the charts).
+- **Laws behind Exemption 3** come from report table 06. Reports spell the same law in many ways (about 1,600 spellings of about 500 laws), so laws are grouped by U.S. Code title and section, and a section the reports say was renumbered goes under its current number. Text naming several laws counts under the first one. Commerce's FY2025 agency row counts its department-wide row twice, so its components are used for that year. Text with no U.S. Code citation stays as written. Names are each section's own title in the U.S. Code and links go to its text at Cornell's Legal Information Institute; descriptions are the agencies' own words. A law's count is the times it was relied on, and these do not add up exactly to the Exemption 3 count, which comes from a different table.
+
+**For the client to decide:** which outcomes to group together, and whether the laws view is useful to keep.`,
+  md`- **Reversal rate** = appeals reversed fully or partly ÷ a base. The base changes the answer a lot: for all reporting agencies in FY2025, it is **52.2%** out of appeals decided on the merits (affirmed + reversed) and **32.5%** out of all processed appeals (including those closed for other reasons, e.g. withdrawn).
+- Across agencies, counts are added first and then divided, so large agencies weigh more (no average of agency rates).
+- The FY2010 peak comes from DHS: 4,032 appeals reversed fully or partly, against about 1,100 in FY2009 and FY2011.
+
+The top of the page gives both rates, whichever base the charts use.
+
+**For the client to decide:** which base the charts should use by default, and whether "partly reversed" counts as a reversal.`,
+  md`- **Growth** is the change from the year before, counting only agencies (or components) that report in both years, so agencies that start reporting do not count as growth. For a single small agency or component, changes above +300% (from very small starting numbers) are cut off the chart; the Tables tab has every value. FY2025: backlog **+27.3%**, requests received **+13.7%** (117 agencies in both years; with all agencies, +27.2% and +13.7%).
+- **Backlog is a stock, requests received are a flow**: compare their growth, not their sizes. "Backlog ÷ received" puts the backlog next to the year's intake: 0.23 in FY2008, 0.20 in FY2025.
+- **Who holds the backlog**: in FY2025 the 10 largest agencies hold 90% of it; DHS alone holds 49.6%. With an agency picked, the chart splits its backlog by component; if the agency total is larger than its components added up, the difference is its own bar.
+- Backlog as first reported; the next year's revision is in Question 3.
+
+**For the client to decide:** growth over the same agencies, or over all reporting agencies? Backlog as first reported or as revised?`,
+  md`- **Any measure** from 31 of the 32 data types (214 measures). Not here: 06 (the laws behind Exemption 3, shown in Step 3), the reason texts of 03 and 11 (their totals are included) and the receipt dates. Names follow the annual report's fields.
+- **Counts and dollar amounts** are added up for the government total. **Medians, averages, day counts and percentages** are not: pick an agency, or compare agencies in the table.
+- **Right chart**: how many agencies (or components) report a value each year, to show where the data is thin before comparing.
+- **Agency totals and component numbers** come from foia.gov's API (the team repository's component table). Where an agency reported the same component twice in one table, the two entries are added up, as foia.gov does.
+- **"(Agency total minus components)"** in the table, shown when it is not 0. Components add up to the agency total in all but 20 of the 482 agency-years with components. In 7 of them foia.gov has numbers it links to no component (e.g. OPM FY2017: 7,550 requests received); in the other 13 foia.gov's own total and its components disagree (e.g. GSA FY2016: its totals for complex and expedited requests are exactly twice its components).
+
+**For the client to decide:** which measures to feature.`]
+```
+
+```{ojs}
+//| output: false
+// ---------- About the data: what the numbers are, the words, and the limits ----------
+function about() {
+  const revised = Q3.filter(d => d.level === "agency" && d.restated).length
+  return html`<div class="about">${md`
+### What this is
+
+Every federal agency files a FOIA annual report. This dashboard brings the reports on foia.gov for ${SPAN} together, for the ${agencyNames.length} agencies that reported in any of these years, and their components. Agencies report these numbers themselves, and they are shown here as reported.
+
+The numbers say what agencies did, not why. Response times and grant rates are shaped by request volume, complexity, staffing and the kind of records requested, so a difference between two agencies is a place to start asking questions, not a verdict.
+
+### How agencies are shown
+
+- **Agency total and component.** An agency's total already includes its components. A component is never added on top of its agency, and the government total adds up agency rows only. The top of each page says which one you are looking at.
+- **Largest agencies first.** The agency list starts with the 10 that received the most requests in FY${FY_LAST} (${pct(TOP_SHARE)} of all requests). This only shortens the list. Agencies are not ranked by denial rate or given scores.
+
+### What the words mean
+
+- **Perfected request**: reasonably described and made under the agency's FOIA rules. Days are counted from this point.
+- **Days**: working days, unless a table says otherwise. Decisions on expedited processing are counted in calendar days.
+- **Time limit**: 20 working days for a request or an appeal, with up to 10 more in "unusual circumstances".
+- **Simple, complex, expedited**: processing tracks. Every agency must have an expedited track. Other requests are reported as simple or complex, whichever best fits the agency's own tracks, so the labels are not identical across agencies.
+- **Pending**: still open at the end of the fiscal year.
+- **Backlog**: pending past the time limit at the end of the fiscal year. It is a year-end count, so years cannot be added up.
+- **Full grant**: all the records asked for were released. **Partial grant**: some, but not all. **Full denial**: withheld entirely under exemptions.
+- **Exemption**: one of nine legal reasons to withhold information (Exemption 7 has six parts). Counts are times applied, and one request can use several.
+- **Appeal**: a request that the agency review its first decision. **Decided on the merits** means affirmed, partly reversed or fully reversed; the rest were closed for other reasons, such as being withdrawn.
+
+### Blank, N/A, 0 and <1
+
+- **Blank**: the component is not in that table, or the table was not in the report that year. Shown as missing.
+- **N/A**: does not apply, or nothing to calculate. Shown as missing.
+- **0**: for counts, the agency reported zero. In day columns and the "ten oldest" tables, a 0 usually means there were none of that kind, not zero days.
+- **<1**: less than one day.
+
+### Known limits
+
+- **Who reports changes.** ${d3.min(PER_YEAR.values())} to ${d3.max(PER_YEAR.values())} agencies report in a given year, and only ${N_COHORT} report in all ${N_YEARS} years. On the government total, "Agencies added up in the total" can keep the same ${N_COHORT} every year.
+- **Numbers get revised.** In ${revised} agency-years the next report gives a different backlog for the same year. The Staff & cost step shows both versions.
+- **Reported totals do not always match.** In FY2025, Agriculture, Commerce, Labor and Veterans Affairs report an outcomes "Total" that does not match their categories, so shares use the categories added up. Components add up to the agency total in all but 20 of the 482 agency-years with components; Explore shows the difference when there is one.
+- **Working days.** This rule comes from recent editions of the Justice Department's handbook; editions before 2022 have not been checked.
+- **Cost** is not adjusted for inflation.
+- **Laws behind Exemption 3** are grouped from many spellings. Names are titles from the U.S. Code, and the agencies' own words are in the Tables tab. Their counts do not add up exactly to the Exemption 3 count, which comes from a different table.
+- **Not included yet**: the written "other" reasons and receipt dates.
+
+### Sources
+
+Annual reports from foia.gov (built ${D.built}), the Department of Justice Handbook for Agency Annual Freedom of Information Act Reports (updated September 30, 2025), and the U.S. Code as published by Cornell's Legal Information Institute (law titles and links). Each step's last tab explains how its comparison is made.
+
+Student prototype for MuckRock (BU Spark! DS 701). Not an official MuckRock product.
+`}<img class="about-logo" src="assets/muckrock-logo.svg" alt="MuckRock"></div>`
+}
+```
+
+```{ojs}
+viewof qi = {
+  const q0 = +URLQ.get("q")
+  const btn = (id, no, short) => html`<button type="button" class="qbtn" data-id="${id}"><span class="qno">${no}</span><span>${short}</span></button>`
+  const home = btn(0, "•", "Overview")
+  const steps = STORY.map(id => btn(id, stepOf(id), QUESTIONS[id - 1].short))
+  const more = [btn(7, "+", "Explore all data"), btn(8, "i", "About the data")]
+  const items = [home, ...steps, ...more]
+  const wrap = html`<div class="qpick">${home}<div class="qpick-title">Step by step</div>${steps}<div class="qpick-title">Or</div>${more}</div>`
+  wrap.value = q0 >= 1 && q0 <= 8 ? q0 : 0
+  const mark = () => { for (const x of items) x.classList.toggle("on", +x.dataset.id === wrap.value) }
+  mark()
+  for (const b of items) b.onclick = () => {
+    const id = +b.dataset.id
+    wrap.value = id
+    mark()
+    wrap.dispatchEvent(new Event("input", {bubbles: true}))
+  }
+  return wrap
+}
+```
+
+```{ojs}
+viewof xtype = {
+  // the report's tables under six plain topics; 06 (Exemption 3 statutes) is not in the data yet
+  const m = URLQ.get("m"), keep = recall("xtype", v => true, COL.has(m) ? COL.get(m).no : "01")
+  const groups = TOPICS.map(([t, types]) => [t, types.map(d => d[0]).filter(no => TYPES.some(x => x.no === no))])
+  return qi === 7 ? memo("xtype", groupedSelect({label: "Data type", groups, value: keep, format: typeName})) : hidden(keep)
+}
+```
+
+```{ojs}
+viewof xcol = {
+  // keep the chosen measure when the list is rebuilt, if it belongs to the chosen data type
+  const keys = COLS.filter(c => c.no === xtype).map(c => c.key)
+  const m = URLQ.get("m")
+  const keep = recall(`xcol|${xtype}`, v => keys.includes(v), keys.includes(m) ? m : xtype === "01" ? F.received : keys[0])
+  return qi === 7 ? memo(`xcol|${xtype}`, groupedSelect({label: "Measure", groups: [[null, keys]], format: k => COL.get(k).label, value: keep})) : hidden(keep)
+}
+```
+
+```{ojs}
+viewof agency = {
+  const a = URLQ.get("agency")
+  return groupedSelect({label: "Agency", groups: [[null, [TOTAL]], ...AGENCY_GROUPS], value: agencyNames.includes(a) ? a : TOTAL})
+}
+```
+
+```{ojs}
+// always shown, so it is clear that components can be picked; greyed out until an agency with components is chosen
+viewof comp = {
+  // the list is rebuilt when the agency or the years change; keep the chosen component if it is still there
+  const valid = v => compChoices.some(c => c.key === v)
+  const u = URLQ.get("agency") === agency ? URLQ.get("comp") : null
+  if (valid(u)) window.__memo = Object.assign(window.__memo || {}, {[`comp|${agency}`]: u})
+  const keep = recall(`comp|${agency}`, valid, ALL)
+  URLQ.delete("comp")  // the address only sets the first view
+  if (agency === TOTAL || compChoices.length === 0)
+    return groupedSelect({label: "Component", disabled: true, groups: [[null, [ALL]]], value: ALL,
+      format: () => agency === TOTAL ? "Pick an agency first" : "No separate components in these years"})
+  // agencies with many components: the 5 largest first (most requests in the last year chosen), so small offices do not bury them
+  const recv = new Map(ROWS.filter(r => r.level === "component" && r.Agency === agency && r.FY === hi).map(r => [r.Key, V[F.received][r.i] ?? 0]))
+  const big = compChoices.length > 6 ? compChoices.slice().sort((a, b) => (recv.get(b.key) ?? 0) - (recv.get(a.key) ?? 0)).slice(0, 5).filter(c => recv.get(c.key) > 0).map(c => c.key) : []
+  const rest = compChoices.map(c => c.key).filter(k => !big.includes(k))
+  return memo(`comp|${agency}`, groupedSelect({label: "Component", value: keep, format: c => c === ALL ? "All components (agency total)" : compName(c),
+    groups: [[null, [ALL]], [`Largest 5 (FY${hi})`, compChoices.map(c => c.key).filter(k => big.includes(k))], [big.length ? "All other components" : null, rest]]}))
+}
+```
+
+```{ojs}
+//| output: false
+// fiscal years as buttons (client, 11/3: a dropdown hides an important filter). Shown at the top of the page, next to the question.
+// Click a year, then another: that is the range. Click the same year twice for a single year.
+viewof years = {
+  const ok = y => y >= FY_FIRST && y <= FY_LAST
+  const u = [+URLQ.get("from"), +URLQ.get("to")]
+  const presets = [["All years", FY_FIRST, FY_LAST], ["Last 10", FY_LAST - 9, FY_LAST], ["Last 5", FY_LAST - 4, FY_LAST], [`FY${FY_LAST}`, FY_LAST, FY_LAST]]
+  const pbtns = presets.map(([label, a, b]) => html`<button type="button" class="tl-p" data-a="${a}" data-b="${b}">${label}</button>`)
+  const cells = d3.range(FY_FIRST, FY_LAST + 1).map(y => html`<button type="button" class="tl-y" data-y="${y}" title="FY${y}">${String(y).slice(2)}</button>`)
+  const label = html`<span class="tl-label"></span>`
+  const wrap = html`<div class="tl"><div class="tl-top">${pbtns}${label}</div><div class="tl-years">${cells}</div></div>`
+  wrap.value = ok(u[0]) && ok(u[1]) ? [Math.min(...u), Math.max(...u)] : [FY_FIRST, FY_LAST]
+  let anchor = null  // first click of a range
+  const draw = () => {
+    const [a, b] = wrap.value
+    for (const c of cells) {
+      const y = +c.dataset.y
+      c.classList.toggle("on", anchor === null && y >= a && y <= b)
+      c.classList.toggle("anchor", y === anchor)
+      c.setAttribute("aria-pressed", y >= a && y <= b)
+    }
+    for (const p of pbtns) p.classList.toggle("on", anchor === null && +p.dataset.a === a && +p.dataset.b === b)
+    label.textContent = anchor !== null ? `From FY${anchor}: now click the last year` : a === b ? `FY${a}` : `FY${a}–FY${b}`
+  }
+  const set = (a, b) => { wrap.value = [Math.min(a, b), Math.max(a, b)]; draw(); wrap.dispatchEvent(new Event("input", {bubbles: true})) }
+  for (const p of pbtns) p.onclick = () => { anchor = null; set(+p.dataset.a, +p.dataset.b) }
+  for (const c of cells) c.onclick = () => {
+    const y = +c.dataset.y
+    if (anchor === null) { anchor = y; draw(); return }
+    const a = anchor
+    anchor = null
+    set(a, y)
+  }
+  draw()
+  return wrap
+}
+```
+
+```{ojs}
+//| output: false
+// Step 3: two views, switched above the charts (client, 11/3: subcategories above the chart work well)
+viewof sub4 = {
+  const btns = [["main", "Outcomes & exemptions"], ["laws", "Laws behind Exemption 3"]].map(([k, l]) => html`<button type="button" class="subbtn" data-k="${k}">${l}</button>`)
+  const wrap = html`<div class="subview">${btns}</div>`
+  wrap.value = URLQ.get("sub") === "laws" ? "laws" : "main"
+  const mark = () => { for (const b of btns) b.classList.toggle("on", b.dataset.k === wrap.value) }
+  mark()
+  for (const b of btns) b.onclick = () => { wrap.value = b.dataset.k; mark(); wrap.dispatchEvent(new Event("input", {bubbles: true})) }
+  return wrap
+}
+```
+
+```{ojs}
+//| output: false
+fyFrom = years[0]
+fyTo = years[1]
+```
+
+```{ojs}
+viewof compareWith = {
+  // choosing adds to the comparison (no extra button): an agency adds the whole agency; then picking one of its
+  // components replaces that whole-agency entry, and further components are added; up to 5; x removes one
+  const agencySel = Object.assign(document.createElement("select"), {className: "form-select form-select-sm cmp-agency"})
+  fillSelect(agencySel, [[null, [""]], ...AGENCY_GROUPS], a => a || "Choose an agency…")
+  const compSel = html`<select class="form-select form-select-sm cmp-comp" disabled><option value="">Whole agency (all components)</option></select>`
+  const chips = html`<div class="chips"></div>`
+  const hint = html`<div class="side-note">Choosing adds it to the comparison; × removes it.</div>`
+  const wrap = html`<div class="cmp"><div class="cmp-label">Compare with (up to 5)</div>${agencySel}${compSel}${hint}${chips}</div>`
+  wrap.value = (URLQ.get("with") || "").split("~").filter(k => ENT.has(k)).slice(0, 5)
+  let pending = null  // the entry the two lists currently point at
+  const changed = () => wrap.dispatchEvent(new Event("input", {bubbles: true}))
+  const draw = () => {
+    chips.replaceChildren(...wrap.value.map(k => {
+      const x = html`<button type="button" title="Remove">×</button>`
+      x.onclick = () => { wrap.value = wrap.value.filter(v => v !== k); if (pending === k) pending = null; draw(); changed() }
+      const twin = wrap.value.some(v => v !== k && ENT.get(v).short === ENT.get(k).short)  // same name at two agencies
+      return html`<span class="chip">${twin ? ENT.get(k).label : ENT.get(k).short}${x}</span>`
+    }))
+    hint.textContent = wrap.value.length >= 5 ? "Up to 5: remove one (×) to add another." : "Choosing adds it to the comparison; × removes it."
+  }
+  const put = (key, replace) => {
+    if (!ENT.has(key)) return
+    let v = wrap.value.filter(k => k !== key)
+    if (replace && v.includes(replace)) v = v.map(k => k === replace ? key : k)
+    else if (v.length < 5) v = [...v, key]
+    else return draw()
+    wrap.value = [...new Set(v)]; pending = key; draw(); changed()
+  }
+  agencySel.addEventListener("change", () => {
+    const a = agencySel.value
+    const comps = ENTITIES.filter(e => e.key.startsWith(`C|${a}|`)).sort((x, y) => d3.ascending(x.short, y.short))
+    compSel.replaceChildren(html`<option value="">${comps.length ? "Whole agency (all components)" : "No separate components"}</option>`,
+      ...comps.map(e => html`<option value="${e.key}">${e.short}</option>`))
+    compSel.disabled = !a || !comps.length
+    if (a) put(`A|${a}`, null)
+  })
+  compSel.addEventListener("change", () => {
+    const a = agencySel.value, key = compSel.value || `A|${a}`
+    // the first component chosen replaces the whole agency that choosing the agency added
+    put(key, pending === `A|${a}` && compSel.value ? pending : null)
+  })
+  draw()
+  return wrap
+}
+```
+
+```{ojs}
+viewof scope = {
+  // which agencies are added up in the government total: every agency that reported that year (the set grows over the
+  // years, so part of the growth is new reporters), or the same agencies every year
+  const keep = recall("scope", v => v === ALL_AG || v === COHORT, URLQ.get("scope") === "same" ? COHORT : ALL_AG)  // keep the choice when the input is rebuilt
+  if (agency !== TOTAL) return hidden(keep)
+  const radio = memo("scope", Inputs.radio([ALL_AG, COHORT], {label: "Agencies added up in the total", value: keep}))
+  // the note goes inside the input itself, so the input keeps its value
+  radio.append(html`<div class="side-note">The second keeps the same agencies every year, so growth is not just more agencies starting to report.</div>`)
+  return radio
+}
+```
+
+
+```{ojs}
+viewof base5 = {
+  const keep = recall("base5", v => true, URLQ.get("base") === "all" ? "All processed appeals" : "Appeals decided on the merits")  // keep the choice when the input is rebuilt
+  return qi === 5 ? memo("base5", Inputs.radio(["Appeals decided on the merits", "All processed appeals"], {label: "Reversal rate out of", value: keep})) : hidden(keep)
+}
+```
+
+```{ojs}
+html`<p class="side-note">Single-year views (distribution, exemptions, tables) use the last year chosen.<br>
+Data: foia.gov annual reports, ${SPAN}, agency and component level. Built ${D.built}.<br>
+Student prototype for MuckRock (BU Spark! DS 701). Not an official MuckRock product.</p>`
+```
+
+## Column
+
+### Row {height=21%}
+
+```{ojs}
+//| output: false
+yearX = Object({tickFormat: String, label: "Fiscal year"})
+// bar charts: label every other year so the labels do not run together
+yearBand = Object({tickFormat: d => d % 2 === 0 ? String(d) : "", label: "Fiscal year"})
+// chart size from the window (cards report 0 size while a tab is hidden)
+MAIN = width > 0 ? Math.max(560, window.innerWidth - 360) : 560  // depends on width, so it updates on resize
+PAIR = Math.floor((MAIN - 70) / 2)
+CH = Math.max(240, Math.min(560, window.innerHeight - 400))
+TH = Math.max(260, window.innerHeight - 310)
+lo = Math.min(fyFrom, fyTo)
+hi = Math.max(fyFrom, fyTo)
+cohortOnly = agency === TOTAL && scope === COHORT
+// components of the chosen agency in the chosen years (key -> code and latest name), alphabetical
+compChoices = agency === TOTAL ? [] : d3.groups(ROWS.filter(r => r.level === "component" && r.Agency === agency && r.FY >= lo && r.FY <= hi), r => r.Key)
+  .map(([key, rs]) => { const last = d3.greatest(rs, r => r.FY); return {key, code: last.Component, name: last.Name} })
+  .sort((a, b) => d3.ascending(a.name, b.name))
+compName = k => { const x = compChoices.find(x => x.key === k); return x ? `${x.name} (${x.code})` : k }
+// the selection: government total (agency rows), one agency's total, or one component
+inSel = d => agency === TOTAL ? d.level === "agency" && (!cohortOnly || d.cohort)
+  : comp === ALL ? d.level === "agency" && d.Agency === agency
+  : d.level === "component" && d.Agency === agency && d.Key === comp
+pick = rows => rows.filter(d => d.FY >= lo && d.FY <= hi && inSel(d))
+// tables, last year chosen: every agency, or the chosen agency's total and its components
+yearRows = rows => rows.filter(d => d.FY === hi && (agency === TOTAL ? d.level === "agency" && (!cohortOnly || d.cohort) : d.Agency === agency))
+NAME_COL = agency === TOTAL ? "Agency" : "Component"
+rowName = d => agency === TOTAL ? d.Agency : d.level === "agency" ? "(Agency total)" : `${d.Name} (${d.Component})`
+who = agency === TOTAL ? (cohortOnly ? `${N_COHORT} agencies (all ${N_YEARS} years)` : "All reporting agencies")
+  : comp === ALL ? `${agency}, all components` : `${agency} › ${compName(comp)}`
+byYear = rows => rows.slice().sort((a, b) => a.FY - b.FY)
+// years in which the selection has a report at all (shown when it does not cover the chosen years)
+coverNote = (() => {
+  if (agency === TOTAL) return ""
+  const yrs = [...new Set(ROWS.filter(d => inSel(d)).map(d => d.FY))].sort((a, b) => a - b)
+  if (!yrs.length) return ` · no reports in ${SPAN}`
+  const inRange = yrs.filter(y => y >= lo && y <= hi)
+  if (inRange.length === hi - lo + 1) return ""
+  return yrs.length === yrs[yrs.length - 1] - yrs[0] + 1 ? ` · reports for FY${yrs[0]}–FY${yrs[yrs.length - 1]} only` : ` · reports for ${yrs.length} of the ${N_YEARS} years only`
+})()
+selName = agency === TOTAL ? (cohortOnly ? `${N_COHORT} agencies (total)` : "All agencies (total)") : comp === ALL ? agency : compName(comp)
+entityRows = key => {
+  const [lv, a, c] = key.split("|")
+  return ROWS.filter(d => d.FY >= lo && d.FY <= hi && d.Agency === a && (lv === "A" ? d.level === "agency" : d.level === "component" && d.Key === c))
+}
+// an agency total already holds its components: say which one is on screen, and warn when a comparison overlaps (Anna, 11/3)
+levelNote = agency === TOTAL ? "each agency counted once"
+  : comp !== ALL ? "component: already inside the agency total"
+  : compChoices.length ? "agency total: already includes its components" : "agency total"
+overlapNote = (() => {
+  const picked = [...(agency === TOTAL ? [] : [comp === ALL ? `A|${agency}` : `C|${agency}|${comp}`]), ...compareWith]
+  const inside = picked.filter(k => k.startsWith("C|") && picked.includes(`A|${k.split("|")[1]}`))
+  const code = k => (ENT.get(k).short.match(/\(([^)]+)\)$/) || [])[1] || ENT.get(k).short
+  if (inside.length) return `${inside.map(code).join(", ")} ${inside.length > 1 ? "are" : "is"} already inside the agency total shown here: do not add them together.`
+  if (agency === TOTAL && compareWith.length) return "Everything compared here is already inside the government total: do not add them together."
+  return ""
+})()
+// what to look for in each step: how to read it, not what to conclude
+function look(q) {
+  if (lawsOn) return lawGuide()
+  if (compareWith.length) return "Side by side. Agencies differ in size and in the kinds of records they hold, so a gap is a place to start asking questions, not a verdict."
+  if (q === 1) {
+    const rows = Q1.filter(d => d.level === "agency" && d.FY === hi && d.received != null && (!cohortOnly || d.cohort))
+    const top = d3.greatest(rows, d => d.received), sum = d3.sum(rows, d => d.received)
+    return `Compare received with processed: when processed stays below received, open requests build up.${agency === TOTAL && top && sum ? ` ${top.Agency} received ${pct(top.received / sum)} of all requests in FY${hi}, so the total mostly follows it.` : ""}`
+  }
+  if (q === 2) return "Read the three tracks separately. The basic time limit is 20 working days. Agencies sort requests into simple and complex themselves, so the same label can mean different things at different agencies."
+  if (q === 3) return "All four measures start at 100, so their movement can be compared. Moving together does not show that one causes the other. Cost is not adjusted for inflation."
+  if (q === 4) return "A full grant is only one way a request ends: others end with no records, withdrawn or referred. Exemptions count times applied, and one request can use several."
+  if (q === 5) return "An appeal asks an agency to review its first decision. The rate depends on what it is divided by: appeals closed for other reasons, such as withdrawn, count only in the larger base."
+  if (q === 6) return "Compare how fast the backlog grows with how fast requests grow. The backlog is a year-end count, so years cannot be added up."
+  if (q === 7) return `${xtype === "04" ? "Days in this table are calendar days. " : ""}The right chart shows how many ${agency === TOTAL ? "agencies" : "components"} report this measure each year, so you can see where the data is thin.`
+  return ""
+}
+// the view in the page address, so it can be shared
+syncUrl = () => {
+  const p = new URLSearchParams()
+  if (qi) p.set("q", qi)
+  if (agency !== TOTAL) p.set("agency", agency)
+  if (agency !== TOTAL && comp !== ALL) p.set("comp", comp)
+  if (lo !== FY_FIRST || hi !== FY_LAST) { p.set("from", lo); p.set("to", hi) }
+  if (compareWith.length) p.set("with", compareWith.join("~"))
+  if (cohortOnly) p.set("scope", "same")
+  if (qi === 5 && base5 === "All processed appeals") p.set("base", "all")
+  if (qi === 7) p.set("m", xcol)
+  if (lawsOn) p.set("sub", "laws")
+  const s = p.toString()
+  history.replaceState(null, "", s ? `?${s}` : location.pathname)
+}
+function linkButton() {
+  const b = html`<button type="button" class="stepbtn">Copy link to this view</button>`
+  b.onclick = async () => {
+    try { await navigator.clipboard.writeText(location.href); b.textContent = "Link copied" }
+    catch (e) { b.textContent = "Copy it from the address bar" }
+    setTimeout(() => { b.textContent = "Copy link to this view" }, 1800)
+  }
+  return b
+}
+function stepNav(q) {
+  const i = STORY.indexOf(q)
+  if (i < 0) return ""
+  const go = (id, text) => { const b = html`<button type="button" class="stepbtn">${text}</button>`; b.onclick = () => openStep(id); return b }
+  return html`<span class="stepnav">${i > 0 ? go(STORY[i - 1], "← Back") : go(0, "← Overview")}${i < STORY.length - 1
+    ? go(STORY[i + 1], `Next: ${QUESTIONS[STORY[i + 1] - 1].short} →`) : go(7, "Explore all data →")}</span>`
+}
+```
+
+```{ojs}
+{
+  syncUrl()
+  const plain = qi === 0 || qi === 8  // no tabs on these two pages
+  document.body.classList.toggle("noq", plain)
+  if (plain) { const first = document.querySelector(".nav-tabs .nav-link"); if (first && !first.classList.contains("active")) first.click() }
+  const side = html`<div class="qside">${qi === 8 ? "" : viewof years}<div class="qtools">${stepNav(qi)}${linkButton()}</div></div>`
+  const warn = t => t ? html`<span class="warn">${t}</span>` : ""
+  if (qi === 8) return html`<div class="qtop"><div class="qhead"><span class="qnum">About the data</span> ${QUESTIONS[7].text}
+    <div class="sel">Data from foia.gov annual reports, ${SPAN} · built ${D.built}</div></div>${side}</div>`
+  if (qi === 0) return html`<div class="qtop"><div class="qhead"><span class="qnum">Overview</span> What happens to a FOIA request, in six steps
+    <div class="sel">${who} · ${levelNote}${warn(coverNote)}</div>
+    ${overlapNote ? html`<div class="sel">${warn(overlapNote)}</div>` : ""}
+    <div class="look">From the request arriving to the staff and money behind it. Open a step for its charts and tables.</div></div>${side}</div>`
+  const q = QUESTIONS[qi - 1]
+  const what = qi === 7 ? `${COL.get(xcol).label} · foia.gov table ${xtype}: ${COL.get(xcol).type} · ` : ""
+  const oneYear = lo === hi ? html`<span class="warn"> · one year chosen: pick a range of years to see trends</span>` : ""
+  const g = glance(qi)
+  return html`<div class="qtop"><div class="qhead"><span class="qnum">${qi === 7 ? "Explore" : `Step ${stepOf(qi)} of 6`}</span> ${q.text}
+    <div class="sel">${what}${who} · ${levelNote}${warn(coverNote)}${oneYear}</div>
+    ${overlapNote ? html`<div class="sel">${warn(overlapNote)}</div>` : ""}
+    ${g ? html`<div class="glance"><b>FY${hi}:</b> ${g}</div>` : ""}</div>${side}</div>`
+}
+```
+
+### Row {.tabset}
+
+```{ojs}
+//| title: Chart
+qi === 0 ? overview() : qi === 8 ? about() : html`<div>${qi === 4 && !compareWith.length ? viewof sub4 : ""}<div class="look chartlook">${look(qi)}</div>${lawsOn ? chartLaws() : withCompare(qi, [chart1, chart2, chart3, chart4, chart5, chart6, chartX][qi - 1]())}</div>`
+```
+
+```{ojs}
+//| title: Tables
+qi === 0 || qi === 8 ? html`<div></div>` : tablePanel(qi)
+```
+
+```{ojs}
+//| title: How the comparison is made
+qi === 0 || qi === 8 ? html`<div></div>` : html`<div class="how">${NOTES[qi - 1]}${RULES}</div>`
+```

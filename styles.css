@@ -1,0 +1,139 @@
+/* value-box numbers written as text (formatted with commas or %) get the same size as plain numbers */
+div.value-box-area span.vb { font-size: 2.4rem; line-height: 1.2; font-family: var(--bs-body-font-family); }
+/* multi-select on Q1: keep 4 rows visible instead of being squeezed to one line */
+select[multiple] { min-height: 5.6em; flex: none; }
+/* "How the comparison is made" cards: slightly smaller text so the whole note fits */
+.how .card-body { font-size: 0.85rem; }
+.how .card-body ul { margin-bottom: 0.4rem; }
+/* v2 (one page, sidebar): question header, two charts side by side, notes */
+.qhead { font-size: 1.05rem; line-height: 1.35; }
+.qhead .qnum { font-weight: 600; margin-right: 0.4em; }
+.qhead .sel { color: #6c6b66; font-size: 0.85rem; margin-top: 0.2rem; }
+.pair { display: flex; gap: 40px; flex-wrap: wrap; align-items: flex-start; }
+.pair figure { margin: 0; }
+.pair h6 { margin: 0 0 6px; font-weight: 600; font-size: 0.92rem; }
+.side-note { font-size: 0.78rem; color: #6c6b66; margin-top: 0.5rem; }
+div.how { font-size: 0.9rem; max-width: 900px; }
+/* notes tab: start at the top instead of vertically centred */
+.cell-output-display:has(div.how), .card-body:has(div.how) { justify-content: flex-start !important; }
+.html-fill-container:has(> .observablehq > div.how) { justify-content: flex-start !important; }
+.observablehq:has(> div.how) { margin: 0 !important; flex: 0 0 auto !important; }
+/* hidden OJS source blocks still take space in a card; remove them */
+.card-body > .code-copy-outer-scaffold { display: none !important; }
+/* MuckRock blue for the title bar */
+.navbar { background-color: #4582CC !important; }
+/* question list: click to choose, click again to clear */
+.qpick { display: flex; flex-direction: column; gap: 2px; margin-bottom: 0.6rem; }
+.qpick-title { font-size: 0.8rem; font-weight: 600; color: #6c6b66; margin: 0.4rem 0 0.2rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.qbtn { display: flex; gap: 0.5em; align-items: baseline; text-align: left; border: 0; border-left: 3px solid transparent;
+        background: transparent; padding: 0.35rem 0.5rem; border-radius: 4px; font-size: 0.9rem; color: inherit; cursor: pointer; }
+.qbtn:hover { background: #eef3fa; }
+.qbtn.on { background: #e3edf9; border-left-color: #4582CC; font-weight: 600; }
+.qbtn .qno { min-width: 1em; color: #4582CC; font-weight: 600; }
+.chart-note { padding: 1.5rem 1rem; color: #6c6b66; max-width: 420px; }
+.qbtn, .qbtn:hover, .qbtn:focus, .qbtn:active { color: #212529 !important; outline: none; }
+/* component list before an agency is chosen */
+select:disabled { color: #8a8f98; background-color: #eef0f3; cursor: not-allowed; }
+/* Tables tab: three views */
+.tview { display: inline-flex; border: 1px solid #c9d6ea; border-radius: 6px; overflow: hidden; margin-bottom: 0.8rem; }
+.tvbtn { border: 0; background: #fff; padding: 0.3rem 0.9rem; font-size: 0.88rem; color: #212529; cursor: pointer; }
+.tvbtn + .tvbtn { border-left: 1px solid #c9d6ea; }
+.tvbtn.on { background: #4582CC; color: #fff; }
+.tcap { margin-bottom: 1.2rem; }
+.tcap h6 { font-weight: 600; font-size: 0.92rem; margin: 0 0 0.4rem; }
+/* row checkboxes of Inputs.table: selecting rows does nothing here, so hide that column
+   (the bundled Inputs version ignores select: false) */
+.tab-pane table th:has(> input[type=checkbox]), .tab-pane table td:has(> input[type=checkbox]) { display: none; }
+/* Compare with: name box and removable chips */
+.cmp { margin: 0.2rem 0 0.8rem; }
+.cmp-label { font-size: 0.9rem; margin-bottom: 0.25rem; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.chip { display: inline-flex; align-items: center; gap: 4px; background: #e3edf9; border-radius: 10px; padding: 1px 4px 1px 8px; font-size: 0.78rem; }
+.chip button { border: 0; background: transparent; color: #4582CC; font-weight: 700; cursor: pointer; padding: 0 2px; }
+.qhead .warn { color: #a15c00; }
+/* nothing chosen / overview: no empty tab strip above the content */
+body.noq .card:has(> .card-header .nav-tabs) > .card-header { display: none; }
+.qhead .glance { margin-top: 0.3rem; font-size: 0.9rem; color: #1f3d66; background: #eef3fa; border-radius: 4px; padding: 0.15rem 0.5rem; display: inline-block; }
+/* narrower windows: the timeline goes under the question */
+@media (max-width: 1100px) { .qtop { flex-direction: column; gap: 0.6rem; } .qside { flex: 1 1 auto; width: 100%; } }
+/* Compare with: search results under the box */
+.cmp-list { border: 1px solid #c9d6ea; border-radius: 4px; margin-top: 2px; max-height: 260px; overflow-y: auto; background: #fff; }
+.cmp-item { padding: 4px 8px; font-size: 0.8rem; line-height: 1.25; cursor: pointer; border-bottom: 1px solid #f0f2f5; }
+.cmp-item.on, .cmp-item:hover { background: #e3edf9; }
+.cmp-empty { padding: 4px 8px; font-size: 0.8rem; color: #6c6b66; }
+/* Compare with: agency, then component */
+.cmp select { margin-bottom: 4px; }
+
+/* top of the page: question on the left, years and tools on the right */
+.qtop { display: flex; gap: 1.5rem; align-items: flex-start; justify-content: space-between; }
+.qtop .qhead { flex: 1 1 auto; min-width: 0; }
+.qside { flex: 0 0 440px; }
+.look { margin-top: 0.3rem; font-size: 0.85rem; color: #55544f; line-height: 1.3; }
+/* fiscal years: buttons and a clickable strip */
+.tl-top { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
+.tl-p { border: 1px solid #c9d6ea; background: #fff; color: #212529; border-radius: 4px; padding: 1px 8px; font-size: 0.8rem; cursor: pointer; }
+.tl-p:hover { background: #eef3fa; }
+.tl-p.on { background: #4582CC; border-color: #4582CC; color: #fff; }
+.tl-label { margin-left: auto; font-size: 0.8rem; color: #55544f; white-space: nowrap; }
+.tl-years { display: flex; gap: 1px; }
+.tl-y { flex: 1 1 0; min-width: 0; border: 0; background: #eef0f3; color: #55544f; font-size: 0.7rem; line-height: 1; padding: 5px 0; cursor: pointer; }
+.tl-y:hover { background: #cfe0f4; }
+.tl-y.on { background: #78b7e2; color: #12233b; }
+.tl-y.anchor { background: #4582CC; color: #fff; }
+/* step buttons and the link button */
+.qtools { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 6px; }
+.stepnav { display: inline-flex; gap: 6px; }
+.stepbtn { border: 1px solid #c9d6ea; background: #fff; color: #1f3d66; border-radius: 4px; padding: 1px 8px; font-size: 0.8rem; cursor: pointer; white-space: nowrap; }
+.stepbtn:hover { background: #eef3fa; }
+.qtools .stepbtn:last-child:not(.stepnav .stepbtn) { margin-left: auto; }
+/* overview: the six steps */
+.story { display: grid; gap: 10px; }
+.tile { border: 1px solid #e3e7ee; border-radius: 6px; padding: 8px 12px; }
+.tile.step { cursor: pointer; }
+.tile.step:hover, .tile.step:focus { border-color: #4582CC; outline: none; }
+.tstep { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 0.95rem; }
+.tno { display: inline-flex; width: 1.4em; height: 1.4em; align-items: center; justify-content: center; border-radius: 50%; background: #4582CC; color: #fff; font-size: 0.75rem; }
+.topen { margin-left: auto; font-weight: 400; font-size: 0.78rem; color: #4582CC; }
+.tlabel { font-size: 0.78rem; color: #6c6b66; line-height: 1.2; margin-top: 4px; }
+.tvalrow { display: flex; align-items: baseline; gap: 8px; }
+.tval { font-size: 1.45rem; font-weight: 600; }
+.tchg { font-size: 0.78rem; color: #6c6b66; }
+.tline { font-size: 0.82rem; color: #333; min-height: 1.3em; line-height: 1.25; margin-bottom: 2px; }
+/* the agency, component and data type lists */
+.gsel { margin-bottom: 0.8rem; }
+.gsel label { display: block; font-size: 0.9rem; margin-bottom: 0.25rem; }
+/* tables: download */
+.csv { font-weight: 400; font-size: 0.78rem; margin-left: 0.5em; }
+/* About the data */
+.about { max-width: 820px; font-size: 0.92rem; }
+.about h3 { font-size: 1.02rem; font-weight: 600; margin: 1rem 0 0.35rem; }
+.about h3:first-child { margin-top: 0; }
+.about ul { margin-bottom: 0.4rem; padding-left: 1.2rem; }
+.about-logo { display: block; width: 130px; opacity: 0.45; margin-top: 0.8rem; }
+.cell-output-display:has(div.about), .card-body:has(div.about) { justify-content: flex-start !important; }
+.html-fill-container:has(> .observablehq > div.about) { justify-content: flex-start !important; }
+.observablehq:has(> div.about) { margin: 0 !important; flex: 0 0 auto !important; }
+.gsel select { font-size: 0.85rem; padding-right: 1.7rem; background-position: right 0.4rem center; }
+.qpick { margin-top: 1.2rem; }
+.chartlook { margin: 0 0 0.6rem; }
+/* the header row takes the height of its text; the charts get the rest (Quarto's row share would clip it) */
+.bslib-grid:has(> .bslib-grid > .card .qtop) { grid-template-rows: auto minmax(0, 1fr) !important; }
+/* Step 3: the two views above the charts */
+.subview { display: inline-flex; border: 1px solid #c9d6ea; border-radius: 6px; overflow: hidden; margin-bottom: 0.5rem; }
+.subbtn { border: 0; background: #fff; padding: 0.2rem 0.8rem; font-size: 0.85rem; color: #212529; cursor: pointer; }
+.subbtn + .subbtn { border-left: 1px solid #c9d6ea; }
+.subbtn.on { background: #4582CC; color: #fff; }
+/* Step 3: the list of laws: what it covers on the left, the count and citation on the right */
+.lawlist { display: flex; flex-direction: column; }
+.law { display: grid; grid-template-columns: 12px minmax(0, 1fr) 200px; column-gap: 8px; align-items: start; padding: 8px 0; border-bottom: 1px solid #eef0f3; }
+.law:last-child { border-bottom: 0; }
+.lawdot { width: 9px; height: 9px; border-radius: 50%; margin-top: 4px; }
+.lawwords { font-size: 0.84rem; line-height: 1.25; color: #333; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.lawline { display: flex; align-items: center; gap: 6px; }
+.lawbar { flex: 1 1 auto; height: 8px; }
+.lawbar i { display: block; height: 100%; min-width: 1px; background: #4582CC; border-radius: 2px; }
+.lawn { flex: none; min-width: 3.4em; text-align: right; font-size: 0.84rem; font-weight: 600; }
+.lawcite { display: inline-block; margin-top: 1px; font-size: 0.74rem; color: #6c6b66; white-space: nowrap; }
+a.lawcite { color: #2f67ad; text-decoration: none; }
+a.lawcite:hover { text-decoration: underline; }
+a.lawcite::after { content: " ↗"; }

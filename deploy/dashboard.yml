@@ -1,0 +1,59 @@
+# Draft GitHub Actions workflow: rebuild the dashboard data, render it, publish to GitHub Pages.
+# To use it, copy to .github/workflows/dashboard.yml at the repository root.
+# Paths assume the dashboard lives in fa26/dashboard/ and the data in fa26/dataset/component_level/.
+name: Build and publish dashboard
+
+on:
+  schedule:
+    - cron: "0 12 1 * *"   # 12:00 UTC on the 1st of every month (agencies keep filing late reports for months)
+  workflow_dispatch:         # "Run workflow" button for a manual rebuild
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python packages
+        run: pip install -r fa26/dashboard/requirements.txt
+
+      # Not yet: download new annual reports from the foia.gov API and rebuild the component table
+      # (the build script is not in the repository yet).
+      # Until then the build uses the component table committed in the repository.
+
+      - name: Build the dashboard data
+        run: >
+          python fa26/dashboard/prep.py
+          --components fa26/dataset/component_level/component_master_no_03_06_11.csv
+
+      - uses: quarto-dev/quarto-actions/setup@v2
+
+      - name: Render
+        run: quarto render fa26/dashboard
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: fa26/dashboard/_site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
