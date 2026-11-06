@@ -249,12 +249,14 @@ function trend({data, y, z = null, names = null, colors = [BRAND], yopt = {}, ti
   const known = data.filter(d => d[y] != null && !Number.isNaN(d[y]))
   if (!known.length) return note(`Nothing reported for FY${lo}–FY${hi}.`)
   const solid = withGaps(dashed ? data.filter(d => !dashed(d)) : data, y, z)
-  return Plot.plot({height, width: PAIR, marginLeft: 60, x: yearX, y: Object.assign({grid: true}, yopt), color,
-    marks: [...rules,
+  return Plot.plot({height, width: PAIR, marginLeft: 60, x: yearX, y: Object.assign({grid: true, nice: true, zero: true}, yopt), color,
+    marks: [AXIS_LINE, ...rules,
             Plot.lineY(solid, {x: "FY", y, stroke: z || colors[0], strokeWidth: 2, clip}),
             ...(dashed ? [Plot.lineY(withGaps(data.filter(dashed), y, z), {x: "FY", y, stroke: z || colors[0], strokeWidth: 2, strokeDasharray: "5,3", clip})] : []),
             Plot.dot(known, {x: "FY", y, fill: z || colors[0], r: 3, tip: true, title, clip})]})
 }
+// Plot draws no line along the x-axis by default
+AXIS_LINE = Plot.frame({anchor: "bottom", stroke: "#8a8f98"})
 // the year axis of a two-year chart: both years stay on it even if one has no report
 TWO_YEARS = Object({domain: [lo, hi], axis: "bottom", label: null, tickFormat: d => `FY${d}`})
 plainTable = (rows, format = {}, first = "FY") => Inputs.table(rows, {layout: "auto", maxHeight: TH - 60, sort: first,
@@ -415,9 +417,10 @@ function chart3() {
     : hi - lo === 1 ? trend({data: idx, y: "index", z: "measure", names: Object.keys(MEASURES3), colors: SERIES.slice(0, 4), yopt: {label: `Index (FY${lo} = 100)`},
         title: d => `${d.measure}, FY${d.FY}: ${d.measure === "Total cost" ? "$" : ""}${fmt(Math.round(d.value))} (index ${Math.round(d.index)}, FY${d.base} = 100)`})
     : Plot.plot({
-    height: CH, width: PAIR, marginLeft: 50, x: yearX, y: {grid: true, label: `Index (FY${lo} = 100)`},
+    height: CH, width: PAIR, marginLeft: 50, x: yearX, y: {grid: true, nice: true, label: `Index (FY${lo} = 100)`},
     color: {domain: Object.keys(MEASURES3), range: SERIES.slice(0, 4), legend: true},
-    marks: [Plot.ruleY([100], {stroke: "#c3c2b7"}),
+    marks: [AXIS_LINE, Plot.ruleY([100], {stroke: "#6c6b66", strokeDasharray: "5,4"}),
+            Plot.text([100], {x: hi, y: d => d, text: () => `FY${lo} level = 100`, textAnchor: "end", dy: -7, fill: "#55544f", fontSize: 11}),
             Plot.lineY(idx, {x: "FY", y: "index", stroke: "measure", strokeWidth: 2}),
             Plot.dot(idx, {x: "FY", y: "index", fill: "measure", r: 3, tip: true,
               title: d => `${d.measure}, FY${d.FY}: ${d.measure === "Total cost" ? "$" : ""}${fmt(Math.round(d.value))} (index ${Math.round(d.index)}, FY${d.base} = 100)`})]})
@@ -856,8 +859,8 @@ function compareFig(k, w, h, legend, lastYear = false) {
   // two years: bars side by side, as in trend()
   if (hi - lo === 1) return Plot.plot({height: h, width: w, marginLeft: 60, fx: TWO_YEARS, x: {axis: null, domain: names}, y: Object.assign({nice: true}, yAxis), color,
     marks: [Plot.barY(s, {fx: "FY", x: "name", y: "value", fill: "name", tip: true, title}), Plot.ruleY([0])]})
-  return Plot.plot({height: h, width: w, marginLeft: 60, x: Object.assign({}, yearX, {label: null}), y: yAxis, color,
-    marks: [Plot.lineY(withGaps(s.filter(d => !d.ref), "value", "name"), {x: "FY", y: "value", stroke: "name", strokeWidth: 2}),
+  return Plot.plot({height: h, width: w, marginLeft: 60, x: Object.assign({}, yearX, {label: null}), y: Object.assign({nice: true, zero: true}, yAxis), color,
+    marks: [AXIS_LINE, Plot.lineY(withGaps(s.filter(d => !d.ref), "value", "name"), {x: "FY", y: "value", stroke: "name", strokeWidth: 2}),
             Plot.lineY(withGaps(s.filter(d => d.ref), "value", "name"), {x: "FY", y: "value", stroke: "name", strokeWidth: 1.5, strokeDasharray: "5,4"}),
             Plot.dot(s, {x: "FY", y: "value", fill: "name", r: 2.5, tip: true, title})]})
 }
@@ -1420,7 +1423,7 @@ function look(q) {
     return `Compare received with processed: when processed stays below received, open requests build up.${agency === TOTAL && top && sum ? ` ${top.Agency} received ${pct(top.received / sum)} of all requests in FY${hi}, so the total mostly follows it.` : ""}`
   }
   if (q === 2) return "Read the three tracks separately. The basic time limit is 20 working days. Agencies sort requests into simple and complex themselves, so the same label can mean different things at different agencies."
-  if (q === 3) return "All four measures start at 100, so their movement can be compared. Moving together does not show that one causes the other. Cost is not adjusted for inflation."
+  if (q === 3) return "All four measures start at 100, so their movement can be compared: below the dashed line means lower than in the first year. Moving together does not show that one causes the other. Cost is not adjusted for inflation."
   if (q === 4) return "A full grant is only one way a request ends: others end with no records, withdrawn or referred. Exemptions count times applied, and one request can use several."
   if (q === 5) return "An appeal asks an agency to review its first decision. The rate depends on what it is divided by: appeals closed for other reasons, such as withdrawn, count only in the larger base."
   if (q === 6) return "Compare how fast the backlog grows with how fast requests grow. The backlog is a year-end count, so years cannot be added up."

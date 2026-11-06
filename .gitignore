@@ -4,3 +4,6 @@ _site/
 __pycache__/
 .DS_Store
 old/
+
+/.quarto/
+**/*.quarto_ipynb

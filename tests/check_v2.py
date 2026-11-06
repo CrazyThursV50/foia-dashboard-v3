@@ -276,6 +276,12 @@ with sync_playwright() as p:
     pg.locator('.tvbtn[data-k="chart"]').click(); pg.wait_for_timeout(700)
     same("blank outcomes table", [t.strip() for t in pg.locator(".tcap").first.locator("tbody tr").last.locator("td").all_inner_texts() if t.strip()], ["2025"])
 
+    # counts start at zero and the x-axis has a line, so no point looks like it is under the axis
+    pg.goto(URL + "?q=7"); pg.wait_for_selector(".qtop"); pg.wait_for_timeout(1800)
+    fig = """() => { const s = document.querySelector('.tab-pane.active .pair figure svg[class^=plot]'); const t = [...s.querySelectorAll('g[aria-label="y-axis tick label"] text')].map(x => x.textContent)
+      return {zero: t.includes('0'), frame: !!s.querySelector('g[aria-label="frame"]')} }"""
+    same("axis: from zero, with a line", pg.evaluate(fig), {"zero": True, "frame": True})
+
     # ---- lists ----
     pg.goto(URL); pg.wait_for_selector(".qbtn"); pg.wait_for_timeout(3500)
     ag = M[M["Row Type"] == "agency_overall"]
